@@ -39,7 +39,8 @@ class SplitSearchConfig:
     gaussian_sigma: float = 8.0
     min_fraction: float = 0.25
     max_fraction: float = 0.75
-    margin_pixels: int = 10
+    margin_pixels: int = 14
+    vertical_opening_fraction: float = 0.08
 
 
 @dataclass

@@ -111,7 +111,14 @@ def build_preprocessing_tab():
                     0.0, 1.0, value=0.75, step=0.01, label="Max cut fraction clamp"
                 )
                 margin_pixels = gr.Slider(
-                    0, 50, value=10, step=1, label="Margin pixels below valley"
+                    0, 50, value=14, step=1, label="Margin pixels below valley"
+                )
+                vertical_opening_fraction = gr.Slider(
+                    0.02,
+                    0.15,
+                    value=0.08,
+                    step=0.005,
+                    label="Vertical opening fraction (stalk removal)",
                 )
 
             run_btn = gr.Button("Run Preprocessing", variant="primary")
@@ -143,6 +150,7 @@ def build_preprocessing_tab():
             top_fraction_v,
             bottom_fraction_v,
             gaussian_sigma_v,
+            vertical_opening_fraction_v,
             min_fraction_v,
             max_fraction_v,
             margin_pixels_v,
@@ -174,6 +182,7 @@ def build_preprocessing_tab():
                 min_fraction=float(min_fraction_v),
                 max_fraction=float(max_fraction_v),
                 margin_pixels=int(margin_pixels_v),
+                vertical_opening_fraction=float(vertical_opening_fraction_v),
             ),
         )
 
@@ -198,6 +207,7 @@ def build_preprocessing_tab():
             top_fraction,
             bottom_fraction,
             gaussian_sigma,
+            vertical_opening_fraction,
             min_fraction,
             max_fraction,
             margin_pixels,
