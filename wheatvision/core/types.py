@@ -17,14 +17,14 @@ class HSVThresholds:
     hue_min: int = 0
     hue_max: int = 180
     saturation_max_background: int = 40
-    value_min_background: int = 200
+    value_min_background: int = 150
 
 
 @dataclass
 class MorphologyConfig:
     """Morphology kernel sizes and iterations."""
 
-    open_kernel: int = 3
+    open_kernel: int = 6
     open_iterations: int = 1
     close_kernel: int = 5
     close_iterations: int = 1
@@ -34,9 +34,9 @@ class MorphologyConfig:
 class SplitSearchConfig:
     """Configuration for valley search along image height."""
 
-    top_fraction: float = 0.2
-    bottom_fraction: float = 0.8
-    gaussian_sigma: float = 5.0
+    top_fraction: float = 0.15
+    bottom_fraction: float = 0.85
+    gaussian_sigma: float = 8.0
     min_fraction: float = 0.25
     max_fraction: float = 0.75
     margin_pixels: int = 10

@@ -2,7 +2,6 @@ import gradio as gr
 import os
 import tempfile
 import zipfile
-import numpy as np
 import cv2
 from typing import List
 
@@ -49,7 +48,6 @@ def _process_batch(files: List[str], config: PreprocessingConfig):
             zipf.write(os.path.join(tmpdir, ears_name), ears_name)
             zipf.write(os.path.join(tmpdir, stalks_name), stalks_name)
 
-            # Build a simple overlay preview
             overlay = image_bgr.copy()
             cv2.line(
                 overlay,
@@ -84,10 +82,10 @@ def build_preprocessing_tab():
                     0, 255, value=40, step=1, label="Saturation max (background)"
                 )
                 value_min_background = gr.Slider(
-                    0, 255, value=200, step=1, label="Value min (background)"
+                    0, 255, value=150, step=1, label="Value min (background)"
                 )
 
-                open_kernel = gr.Slider(1, 15, value=3, step=1, label="Open kernel")
+                open_kernel = gr.Slider(1, 15, value=6, step=1, label="Open kernel")
                 open_iterations = gr.Slider(
                     0, 5, value=1, step=1, label="Open iterations"
                 )
@@ -98,13 +96,13 @@ def build_preprocessing_tab():
 
             with gr.Accordion("Split Parameters", open=False):
                 top_fraction = gr.Slider(
-                    0.0, 0.5, value=0.2, step=0.01, label="Top search start fraction"
+                    0.0, 0.5, value=0.15, step=0.01, label="Top search start fraction"
                 )
                 bottom_fraction = gr.Slider(
-                    0.5, 1.0, value=0.8, step=0.01, label="Bottom search end fraction"
+                    0.5, 1.0, value=0.85, step=0.01, label="Bottom search end fraction"
                 )
                 gaussian_sigma = gr.Slider(
-                    0.0, 20.0, value=5.0, step=0.5, label="Gaussian sigma"
+                    0.0, 20.0, value=8.0, step=0.5, label="Gaussian sigma"
                 )
                 min_fraction = gr.Slider(
                     0.0, 1.0, value=0.25, step=0.01, label="Min cut fraction clamp"
