@@ -1,4 +1,6 @@
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
+import cv2
 
 from wheatvision.core.interfaces import SplitterInterface
 from wheatvision.core.types import PreprocessingConfig
@@ -13,9 +15,6 @@ class RowDensitySplitter(SplitterInterface):
 
     def find_cut(self, foreground_mask: np.ndarray) -> int:
         """Return the cut position where ears transition to stalks."""
-        import cv2
-        import numpy as np
-        from scipy.ndimage import gaussian_filter1d
 
         image_height, image_width = foreground_mask.shape[:2]
 
