@@ -9,7 +9,7 @@ from typing import List
 from wheatvision.core.types import PreprocessingConfig, ImageItem
 from wheatvision.preprocessing.hsv_masker import HSVForegroundMasker
 from wheatvision.preprocessing.row_splitter import RowDensitySplitter
-from wheatvision.preprocessing.pipeline import PreprocessingPipeline
+from wheatvision.preprocessing.preprocessing_pipeline import PreprocessingPipeline
 
 
 def _process_batch(
