@@ -12,11 +12,15 @@ from wheatvision.preprocessing.row_splitter import RowDensitySplitter
 from wheatvision.preprocessing.pipeline import PreprocessingPipeline
 
 
-def _process_batch(files: List[str], config: PreprocessingConfig):
+def _process_batch(
+    files: List[str], config: PreprocessingConfig, output_masked_halves: bool = False
+):
     """Process a batch of uploaded images and return galleries and a zip."""
     masker = HSVForegroundMasker()
     splitter = RowDensitySplitter()
-    pipeline = PreprocessingPipeline(masker=masker, splitter=splitter)
+    pipeline = PreprocessingPipeline(
+        masker=masker, splitter=splitter, output_masked_halves=output_masked_halves
+    )
     pipeline.configure(config)
 
     ears_outputs = []
@@ -121,6 +125,12 @@ def build_preprocessing_tab():
                     label="Vertical opening fraction (stalk removal)",
                 )
 
+                output_masked_halves = gr.Checkbox(
+                    value=False,
+                    label="Output masked halves (keep mask)",
+                    info="If checked, apply the foreground mask to the image BEFORE splitting and output masked halves.",
+                )
+
             run_btn = gr.Button("Run Preprocessing", variant="primary")
             zip_out = gr.File(label="Download outputs (zip)")
 
@@ -186,16 +196,19 @@ def build_preprocessing_tab():
             ),
         )
 
-    def _run(files_list, *params):
+    def _run(files_list, output_masked_halves_flag, *params):
         """Glue function to run preprocessing with UI params."""
         cfg = _collect_config(*params)
-        overlays, masks, ears, stalks, zip_path = _process_batch(files_list, cfg)
+        overlays, masks, ears, stalks, zip_path = _process_batch(
+            files_list, cfg, output_masked_halves=output_masked_halves_flag
+        )
         return overlays, masks, ears, stalks, zip_path
 
     run_btn.click(
         _run,
         inputs=[
             files,
+            output_masked_halves,
             hue_min,
             hue_max,
             saturation_max_background,

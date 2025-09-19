@@ -1,3 +1,4 @@
+import cv2
 from wheatvision.core.interfaces import (
     PreprocessingPipelineInterface,
     ForegroundMaskerInterface,
@@ -11,13 +12,17 @@ class PreprocessingPipeline(PreprocessingPipelineInterface):
     """Runs masking and cut finding to split ears and stalks."""
 
     def __init__(
-        self, masker: ForegroundMaskerInterface, splitter: SplitterInterface
+        self,
+        masker: ForegroundMaskerInterface,
+        splitter: SplitterInterface,
+        output_masked_halves: bool = False,
     ) -> None:
         """Compose pipeline from a masker and a splitter."""
 
         self.masker = masker
         self.splitter = splitter
         self._config = PreprocessingConfig()
+        self._output_masked_halves = output_masked_halves
 
     def configure(self, config: PreprocessingConfig) -> None:
         """Apply configuration to self and children."""
@@ -35,8 +40,11 @@ class PreprocessingPipeline(PreprocessingPipelineInterface):
         cut_position_y = self.splitter.find_cut(foreground_mask)
         density_profile, density_profile_smoothed = self.splitter.last_profiles
 
-        ears_bgr = image[:cut_position_y, :].copy()
-        stalks_bgr = image[cut_position_y:, :].copy()
+        masked_bgr = cv2.bitwise_and(image, image, mask=foreground_mask)
+        base_image = masked_bgr if self._output_masked_halves else image
+
+        ears_bgr = base_image[:cut_position_y, :].copy()
+        stalks_bgr = base_image[cut_position_y:, :].copy()
 
         return PreprocessingResult(
             name=item.name,
