@@ -1,5 +1,5 @@
 # wheatvision/ui/screens/sam_screen.py
-from typing import List, Tuple
+from typing import Tuple
 
 import cv2
 import gradio as gr
@@ -16,132 +16,112 @@ def _to_uint8(img: np.ndarray) -> np.ndarray:
     return img
 
 
+def _colorize_labels(label_map: np.ndarray) -> np.ndarray:
+    """
+    Turn a (H,W) int label map (0..N) into an RGB visualization.
+    Background=0 -> white background for this app (can swap to black if you prefer).
+    """
+    h, w = label_map.shape
+    vis = np.zeros((h, w, 3), dtype=np.uint8)
+    if label_map.max() == 0:
+        return vis  # empty
+
+    # Generate deterministic colors
+    rng = np.random.default_rng(42)
+    colors = rng.integers(
+        low=50, high=230, size=(label_map.max() + 1, 3), dtype=np.uint8
+    )
+    colors[0] = np.array([255, 255, 255], dtype=np.uint8)  # background white
+
+    vis = colors[label_map]
+    return vis
+
+
 def build_sam_tab():
-    gr.Markdown("#### SAM2 segmentation")
+    gr.Markdown("#### SAM2 Oversegmentation")
 
     adapter = Sam2Adapter()
 
-    # If SAM2 is not importable/configured, show a minimal fallback UI (Auto Mask).
     if not adapter.is_available():
         gr.Markdown(
             "> ⚠️ **SAM2 isn’t installed or not importable.** "
-            "Follow the README to install SAM2 and configure `.env`. "
-            "Until then, you can use the simple Auto Mask baseline below."
-        )
-
-        with gr.Row():
-            image_in = gr.Image(
-                label="Upload image",
-                type="numpy",
-                sources=["upload", "clipboard"],
-                height=420,
-            )
-            with gr.Column():
-                status = gr.Markdown("SAM2 unavailable — using baseline.")
-                auto_btn = gr.Button("Auto Mask (Otsu)")
-
-        mask_out = gr.Image(label="Mask", type="numpy", height=420)
-
-        def auto_mask_baseline(img: np.ndarray):
-            if img is None:
-                return None, "Please upload an image."
-            gray = cv2.cvtColor(_to_uint8(img), cv2.COLOR_BGR2GRAY)
-            thr, binm = cv2.threshold(
-                gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV
-            )
-            vis_rgb = np.stack([binm, binm, binm], axis=-1)
-            return vis_rgb, f"Auto mask (Otsu) thr={thr:.1f}"
-
-        auto_btn.click(
-            auto_mask_baseline, inputs=[image_in], outputs=[mask_out, status]
+            "Install SAM2 and configure your `.env` as documented. "
+            "This tab requires SAM2."
         )
         return
 
-    # SAM2 available: render full point-prompt UI + optional Auto Mask baseline.
     with gr.Row():
         image_in = gr.Image(
             label="Upload image",
             type="numpy",
             sources=["upload", "clipboard"],
-            height=420,
+            height=480,
         )
         with gr.Column():
-            status = gr.Markdown("Ready.")
-            fg_points_state = gr.State(value=[])  # type: List[Tuple[int,int]]
-            bg_points_state = gr.State(value=[])
-
-            add_mode = gr.Radio(
-                ["Foreground (+)", "Background (−)"],
-                value="Foreground (+)",
-                label="Click mode",
+            grid_step = gr.Slider(
+                minimum=24,
+                maximum=160,
+                value=64,
+                step=8,
+                label="Grid step (px) — smaller → more segments, slower",
             )
-            with gr.Row():
-                clear_btn = gr.Button("Clear points")
-                run_btn = gr.Button("Run Point Segmentation", variant="primary")
+            iou_thresh = gr.Slider(
+                minimum=0.5,
+                maximum=0.95,
+                value=0.8,
+                step=0.05,
+                label="Deduplicate IoU threshold",
+            )
+            multimask = gr.Checkbox(
+                value=True,
+                label="Use multimask per point (more variants per point)",
+            )
+            run_btn = gr.Button("Run Segmentation", variant="primary")
+            status = gr.Markdown("Ready.")
 
-            auto_btn = gr.Button("Auto Mask (Otsu)")
+    with gr.Row():
+        vis_out = gr.Image(
+            label="Colorized segments (preview)", type="numpy", height=480
+        )
+        label_out = gr.Image(
+            label="Label map (uint16 PNG, 0=background)",
+            type="numpy",
+            height=480,
+        )
 
-    mask_out = gr.Image(label="Mask", type="numpy", height=420)
-
-    # Collect clicks to build FG/BG prompt sets
-    # NOTE: evt comes LAST and is injected by Gradio automatically; DO NOT include gr.EventData() in inputs.
-    def on_click(
-        img: np.ndarray,
-        mode: str,
-        fg_pts: List[Tuple[int, int]],
-        bg_pts: List[Tuple[int, int]],
-        evt: gr.SelectData,  # injected automatically
-    ):
+    def run_overseg(
+        img: np.ndarray, step: int, iou_t: float, multi: bool
+    ) -> Tuple[np.ndarray, np.ndarray, str]:
         if img is None:
-            return fg_pts, bg_pts, "Upload an image first."
-        # evt.index returns (x, y)
-        x, y = int(evt.index[0]), int(evt.index[1])
-        if mode.startswith("Foreground"):
-            fg_pts = fg_pts + [(x, y)]
-        else:
-            bg_pts = bg_pts + [(x, y)]
-        return fg_pts, bg_pts, f"Points → FG:{len(fg_pts)} / BG:{len(bg_pts)}"
+            return None, None, "Please upload an image."
 
-    image_in.select(
-        fn=on_click,
-        inputs=[image_in, add_mode, fg_points_state, bg_points_state],
-        outputs=[fg_points_state, bg_points_state, status],
-    )
-
-    def on_clear():
-        return [], [], "Cleared points."
-
-    clear_btn.click(
-        on_clear, inputs=None, outputs=[fg_points_state, bg_points_state, status]
-    )
-
-    # Run SAM2 with collected points
-    def run_points(
-        img: np.ndarray, fg_pts: List[Tuple[int, int]], bg_pts: List[Tuple[int, int]]
-    ):
-        if img is None:
-            return None, "Please upload an image."
         try:
-            mask01 = adapter.predict_from_points(img, fg_pts, bg_pts)  # (H,W) {0,1}
+            # Returns a (H,W) integer label map
+            label_map = adapter.oversegment(
+                image_bgr=_to_uint8(img),
+                grid_step=int(step),
+                iou_threshold=float(iou_t),
+                multimask=bool(multi),
+            )
         except Sam2NotAvailable as e:
-            return None, f"SAM2 not available: {e}"
-        vis = (mask01 * 255).astype(np.uint8)
-        vis_rgb = np.stack([vis, vis, vis], axis=-1)
-        return vis_rgb, f"Done. FG:{len(fg_pts)} / BG:{len(bg_pts)}"
+            return None, None, f"SAM2 not available: {e}"
+        except Exception as e:
+            return None, None, f"Segmentation error: {e}"
+
+        vis = _colorize_labels(label_map)
+
+        # Ensure label map is a compact dtype for saving/preview (uint16 to be safe for many segments)
+        if label_map.dtype != np.uint16:
+            if label_map.max() < 65535:
+                label_map = label_map.astype(np.uint16)
+            else:
+                # fallback if unexpected huge label count
+                label_map = (label_map % 65535).astype(np.uint16)
+
+        return vis, label_map, f"Done. Segments: {int(label_map.max())}"
 
     run_btn.click(
-        run_points,
-        inputs=[image_in, fg_points_state, bg_points_state],
-        outputs=[mask_out, status],
+        run_overseg,
+        inputs=[image_in, grid_step, iou_thresh, multimask],
+        outputs=[vis_out, label_out, status],
     )
-
-    # Optional quick baseline even when SAM2 is available
-    def auto_mask(img: np.ndarray):
-        if img is None:
-            return None, "Please upload an image."
-        gray = cv2.cvtColor(_to_uint8(img), cv2.COLOR_BGR2GRAY)
-        thr, binm = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
-        vis_rgb = np.stack([binm, binm, binm], axis=-1)
-        return vis_rgb, f"Auto mask (Otsu) thr={thr:.1f}"
-
-    auto_btn.click(auto_mask, inputs=[image_in], outputs=[mask_out, status])

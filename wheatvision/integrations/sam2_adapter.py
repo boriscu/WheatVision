@@ -61,6 +61,85 @@ class Sam2Adapter:
         self._predictor = predictor
 
     @torch.inference_mode()
+    def oversegment(
+        self,
+        image_bgr: np.ndarray,
+        grid_step: int = 64,
+        iou_threshold: float = 0.8,
+        multimask: bool = True,
+    ) -> np.ndarray:
+        """
+        Oversegment an image by probing a uniform grid of foreground points.
+        Returns a (H,W) label map with 0=background, 1..N = segments.
+        Deduplicates masks using IoU to avoid near-duplicates.
+
+        This avoids any UI clicking and doesn't rely on SAM2's auto generator,
+        so it works with the standard SAM2ImagePredictor API.
+        """
+        if self._predictor is None:
+            self.build()
+        assert self._predictor is not None
+
+        image_rgb = image_bgr[..., ::-1].copy()
+        self._predictor.set_image(image_rgb)
+
+        H, W = image_rgb.shape[:2]
+        ys = np.arange(grid_step // 2, H, grid_step)
+        xs = np.arange(grid_step // 2, W, grid_step)
+
+        # Storage
+        kept_masks = []  # list of boolean masks
+        next_label = 1
+
+        # Precompute area to speed IoU
+        def iou_with_existing(mask: np.ndarray) -> float:
+            best = 0.0
+            for m in kept_masks:
+                inter = np.logical_and(mask, m).sum()
+                if inter == 0:
+                    continue
+                union = mask.sum() + m.sum() - inter
+                if union == 0:
+                    continue
+                best = max(best, inter / union)
+                if best >= iou_threshold:
+                    break
+            return best
+
+        use_autocast = bool(self._cfg.autocast if self._cfg else True)
+        use_cuda = self._predictor.model.device.type == "cuda"
+        ctx = self._autocast_ctx(enabled=(use_autocast and use_cuda))
+
+        with ctx:
+            for y in ys:
+                for x in xs:
+                    pts = np.array([[int(x), int(y)]], dtype=np.int32)
+                    labels = np.array([1], dtype=np.int32)
+                    masks, scores, _ = self._predictor.predict(
+                        point_coords=pts,
+                        point_labels=labels,
+                        multimask_output=multimask,
+                    )
+
+                    if scores is not None:
+                        order = np.argsort(-scores)
+                        masks = masks[order]
+
+                    for m in masks:
+                        m_bool = m.astype(bool)
+                        if m_bool.sum() == 0:
+                            continue
+                        if iou_with_existing(m_bool) >= iou_threshold:
+                            continue
+                        kept_masks.append(m_bool)
+
+        label_map = np.zeros((H, W), dtype=np.int32)
+        for idx, m in enumerate(kept_masks, start=1):
+            label_map[m] = idx
+
+        return label_map
+
+    @torch.inference_mode()
     def predict_from_points(
         self,
         image_bgr: np.ndarray,
