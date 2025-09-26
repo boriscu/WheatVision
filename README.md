@@ -39,8 +39,7 @@ Follow https://pytorch.org/
 
 ```bash
 # Example (adjust to your CUDA/OS):
-pip install --index-url https://download.pytorch.org/whl/cu124 \
-  torch==2.5.1 torchvision==0.20.1
+pip install --pre torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
 ```
 
 ### 4) Clone & install SAM2 (editable) next to this repo
