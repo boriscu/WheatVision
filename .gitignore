@@ -206,7 +206,7 @@ marimo/_lsp/
 __marimo__/
 
 # SAM2 add-on (kept outside the repo, but in case someone drops them inside)
-sam2/
-sam2_checkpoints/
-checkpoints/
+external/sam2_repo/
+external/sam2_repo/**
+.checkpoints/
 *.pt

@@ -1,5 +1,6 @@
 import os
 from contextlib import contextmanager
+from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
 from typing import List, Optional, Tuple
 import numpy as np
@@ -22,6 +23,7 @@ class Sam2Adapter:
     """
 
     def __init__(self) -> None:
+        load_dotenv(find_dotenv(filename=".env", usecwd=True))  
         self._cfg: Optional[Sam2Config] = None
         self._predictor = None
         self._available = self._try_import_sam2()
@@ -189,43 +191,52 @@ class Sam2Adapter:
         return build_sam2, SAM2ImagePredictor
 
     def _resolve_config(self, cfg: Sam2Config) -> dict:
-        repo = Path(
-            cfg.sam2_repo_root or os.getenv("WHEATVISION_SAM2_REPO", "sam2")
-        ).resolve()
-        ckpt = Path(
-            cfg.checkpoint_path or os.getenv("WHEATVISION_SAM2_CKPT", "")
-        ).resolve()
-        model_cfg = Path(
-            cfg.model_cfg_path or os.getenv("WHEATVISION_SAM2_CFG", "")
-        ).resolve()
+        from pathlib import Path
+        import os, torch
+
+        repo = Path(cfg.sam2_repo_root or os.getenv("WHEATVISION_SAM2_REPO", "sam2")).resolve()
+
+        ckpt_str = cfg.checkpoint_path or os.getenv("WHEATVISION_SAM2_CKPT", "")
+        if not ckpt_str:
+            raise FileNotFoundError("WHEATVISION_SAM2_CKPT is empty / missing in .env.")
+        ckpt = Path(ckpt_str)
+        if not ckpt.is_absolute():
+            ckpt = (Path.cwd() / ckpt).resolve()
+        if not ckpt.is_file():
+            alt = (repo / ckpt_str).resolve()
+            if alt.is_file():
+                ckpt = alt
+            else:
+                raise FileNotFoundError(
+                    f"Checkpoint not found at:\n  {ckpt}\n"
+                    f"(also tried repo-relative: {alt})\n"
+                    "Fix WHEATVISION_SAM2_CKPT in .env."
+                )
+
+        cfg_str = cfg.model_cfg_path or os.getenv("WHEATVISION_SAM2_CFG", "")
+        if not cfg_str:
+            raise FileNotFoundError("WHEATVISION_SAM2_CFG is empty / missing in .env.")
+        model_cfg = Path(cfg_str)
+        if not model_cfg.is_absolute():
+            model_cfg = (Path.cwd() / model_cfg).resolve()
+        if not model_cfg.is_file():
+            alt = (repo / cfg_str).resolve()
+            if alt.is_file():
+                model_cfg = alt
+            else:
+                raise FileNotFoundError(
+                    f"Model config not found at:\n  {model_cfg}\n"
+                    f"(also tried repo-relative: {alt})\n"
+                    "Fix WHEATVISION_SAM2_CFG in .env."
+                )
+
         device = (
             cfg.device
             or os.getenv("WHEATVISION_SAM2_DEVICE")
             or ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        if not ckpt.is_file():
-            raise FileNotFoundError(
-                f"Checkpoint not found: {ckpt}\n"
-                "Set Sam2Config.checkpoint_path or WHEATVISION_SAM2_CKPT."
-            )
-        if not model_cfg.is_file():
-            rel_cfg = repo / model_cfg
-            if rel_cfg.is_file():
-                model_cfg = rel_cfg.resolve()
-            else:
-                raise FileNotFoundError(
-                    f"Model config not found: {model_cfg}\n"
-                    "Set Sam2Config.model_cfg_path or WHEATVISION_SAM2_CFG (can be relative to repo)."
-                )
-
-        device = cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        return {
-            "repo": repo,
-            "checkpoint": ckpt,
-            "model_cfg": model_cfg,
-            "device": device,
-        }
+        return {"repo": repo, "checkpoint": ckpt, "model_cfg": model_cfg, "device": device}
 
     @staticmethod
     def _pack_points(

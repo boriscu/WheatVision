@@ -3,8 +3,8 @@
 ## Quickstart
 
 ```bash
-# Create a new conda environment with Python 3.10+
-conda create -n wheatvision python=3.10 -y
+# Create a new conda environment with Python 3.11+
+conda create -n wheatvision python=3.11 -y
 conda activate wheatvision
 
 # Install requirements
@@ -18,22 +18,8 @@ python -m wheatvision.app
 
 SAM2 is treated as an **optional add-on**. It is not vendored into this repo and won’t be committed. You install it next to the project and the Segmentation tab will light up automatically if it’s available.
 
-### 1) Create/activate env (Python ≥ 3.10)
 
-```bash
-conda create -n wheatvision python=3.10 -y
-conda activate wheatvision
-```
-
-### 2) Install core
-
-```bash
-pip install -r requirements.txt
-# Optional UI helpers:
-pip install -r requirements-sam2.txt
-```
-
-### 3) Install PyTorch/torchvision for your CUDA/OS
+### 1) Install PyTorch/torchvision for your CUDA/OS
 
 Follow https://pytorch.org/
 
@@ -42,34 +28,34 @@ Follow https://pytorch.org/
 pip install --pre torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
 ```
 
-### 4) Clone & install SAM2 (editable) next to this repo
+### 2) Clone & install SAM2 (editable) next to this repo
 
 ```bash
-# parent folder
-git clone https://github.com/facebookresearch/sam2.git
-pip install -e ./sam2
+mkdir -p external
+git clone https://github.com/facebookresearch/sam2.git external/sam2_repo
+pip install -e external/sam2_rep
 ```
 
-### 5) Download a checkpoint
+### 3) Download a checkpoint
 
 Either use their helper script from the `sam2/checkpoints` folder or download one directly, then place it in a convenient folder, e.g.:
 
 ```bash
-/parent/sam2_checkpoints/sam2.1_hiera_small.pt
+bash external/sam2_repo/checkpoints/download_ckpts.sh
 ```
 
-### 6) Configuring SAM2
+### 4) Configuring SAM2
 
 Configuration lives in `.env` at the project root.
 
 ```bash
-WHEATVISION_SAM2_REPO=./sam2
-WHEATVISION_SAM2_CFG=configs/sam2.1/sam2.1_hiera_s.yaml
-WHEATVISION_SAM2_CKPT=../sam2_checkpoints/sam2.1_hiera_small.pt
+WHEATVISION_SAM2_REPO=external/sam2_repo
+WHEATVISION_SAM2_CFG=external/sam2_repo/sam2/configs/sam2.1/sam2.1_hiera_s.yaml
+WHEATVISION_SAM2_CKPT=external/sam2_repo/checkpoints/sam2.1_hiera_small.pt
 WHEATVISION_SAM2_DEVICE=cuda
 ```
 
-### 7) Run the app
+### 5) Run the app
 
 ```
 python -m wheatvision.app

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 import numpy as np
@@ -47,10 +47,9 @@ class SplitSearchConfig:
 @dataclass
 class PreprocessingConfig:
     """Aggregate configuration for preprocessing."""
-
-    hsv: HSVThresholds = HSVThresholds()
-    morphology: MorphologyConfig = MorphologyConfig()
-    split: SplitSearchConfig = SplitSearchConfig()
+    hsv: HSVThresholds = field(default_factory=HSVThresholds)
+    morphology: MorphologyConfig = field(default_factory=MorphologyConfig)
+    split: SplitSearchConfig = field(default_factory=SplitSearchConfig)
 
 
 @dataclass
