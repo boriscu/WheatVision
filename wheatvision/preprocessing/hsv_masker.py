@@ -14,7 +14,13 @@ class HSVForegroundMasker(ForegroundMaskerInterface):
         super().configure(config)
 
     def make_foreground_mask(self, image_bgr: np.ndarray) -> np.ndarray:
-        """Create a clean foreground mask separating plant from white background."""
+        """
+        Create a clean foreground mask separating plant from white background.
+        Args:
+            image_bgr: Input BGR image as a NumPy array.
+        Returns:
+            A binary mask where foreground pixels are 255 and background pixels are 0.
+        """
 
         hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
         thresholds = self._config.hsv

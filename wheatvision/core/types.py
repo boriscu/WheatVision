@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Optional
 import numpy as np
 
 
@@ -71,3 +72,21 @@ class PreprocessingResult:
     density_profile: np.ndarray
     density_profile_smoothed: np.ndarray
     foreground_mask: np.ndarray
+
+
+@dataclass
+class Sam2Config:
+    """
+    Configuration for building a SAM2 predictor.
+
+    You can leave these as None to use environment variables:
+      - WHEATVISION_SAM2_REPO
+      - WHEATVISION_SAM2_CKPT
+      - WHEATVISION_SAM2_CFG
+    """
+
+    sam2_repo_root: Optional[str] = None
+    checkpoint_path: Optional[str] = None  # .pt
+    model_cfg_path: Optional[str] = None  # .yaml
+    device: Optional[str] = None  # "cuda" | "cpu" | None=auto
+    autocast: bool = True  # Use autocast on CUDA if available

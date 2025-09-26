@@ -30,7 +30,7 @@ def build_app() -> gr.Blocks:
         with gr.Tabs():
             with gr.TabItem("Preprocessing"):
                 build_preprocessing_tab()
-            with gr.TabItem("Segmentation (Coming Soon)"):
+            with gr.TabItem("Segmentation"):
                 build_sam_tab()
 
         gr.Markdown(
