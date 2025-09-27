@@ -107,21 +107,20 @@ def build_sam_tab():
         try:
             label_map = adapter.oversegment(
                 image_bgr=_to_uint8(img),
-                # AMG knobs
                 points_per_side=int(pps),
-                pred_iou_thresh=float(p_iou),
-                stability_score_thresh=float(stab_t),
-                box_nms_thresh=0.7,
-                crop_n_layers=int(crops),
+                predicted_intersection_over_union_threshold=float(p_iou),
+                stability_score_threshold=float(stab_t),
+                box_non_maximum_suppression_threshold=0.7,
+                crop_layer_count=int(crops),
                 crop_overlap_ratio=float(overlap),
-                min_mask_region_area=int(min_px),
-                multimask_output=bool(multi),
+                minimum_mask_region_area=int(min_px),
+                multi_mask_output=bool(multi),
                 points_per_batch=64,
-                # app-level controls
-                progress=progress,
-                downscale_long_side=int(work_res),
-                max_segments=int(max_k),
+                progress_callback=progress,
+                downscale_long_side_pixels=int(work_res),
+                maximum_segment_count=int(max_k),
             )
+            
         except Sam2NotAvailable as e:
             return None, None, f"SAM2 not available: {e}"
         except Exception as e:

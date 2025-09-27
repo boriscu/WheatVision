@@ -14,292 +14,314 @@ class Sam2NotAvailable(RuntimeError):
 
 class Sam2Adapter:
     """
-    Thin OOP wrapper around SAM2's image predictor:
-      - lazy import & construction
-      - explicit configure() step
-      - point-based prediction as a method
-      - no free functions
+    Thin OOP wrapper around SAM2's image predictor.
     """
 
     def __init__(self) -> None:
-        load_dotenv(find_dotenv(filename=".env", usecwd=True))  
-        self._cfg: Optional[Sam2Config] = None
-        self._predictor = None
-        self._available = self._try_import_sam2()
+        load_dotenv(find_dotenv(filename=".env", usecwd=True))
+        self._configuration: Optional[Sam2Config] = None
+        self._image_predictor = None
+        self._is_available = self._try_import_sam2()
 
     def is_available(self) -> bool:
-        """True if SAM2 is importable in this environment."""
-        return self._available
+        return self._is_available
 
-    def configure(self, config: Sam2Config) -> None:
-        """
-        Store configuration and reset any existing predictor.
-        Call build() afterward (or let it build lazily on first use).
-        """
-        self._cfg = config
-        self._predictor = None
+    def configure(self, configuration: Sam2Config) -> None:
+        self._configuration = configuration
+        self._image_predictor = None
 
     def build(self) -> None:
-        """
-        Build the underlying SAM2 predictor immediately.
-        If not called, it will be built lazily upon first prediction.
-        """
-        if not self._available:
+        if not self._is_available:
             raise Sam2NotAvailable(
-                "SAM2 is not importable. Ensure `pip install -e ./sam2` succeeded."
+                "SAM2 is not importable. Ensure `pip install -e external/sam2_repo` succeeded."
             )
-        if self._cfg is None:
-            self._cfg = Sam2Config()
+        if self._configuration is None:
+            self._configuration = Sam2Config()
 
-        cfg = self._resolve_config(self._cfg)
-        build_sam2, SAM2ImagePredictor = self._get_sam2_constructors()
+        resolved_configuration = self._resolve_configuration(self._configuration)
+        build_sam2_constructor, Sam2ImagePredictorClass = self._get_sam2_constructors()
 
-        model = build_sam2(str(cfg["model_cfg_name"]), str(cfg["checkpoint"]))
-        predictor = SAM2ImagePredictor(model)
+        sam2_model = build_sam2_constructor(
+            str(resolved_configuration["model_config_name"]),
+            str(resolved_configuration["checkpoint_path"]),
+        )
+        image_predictor = Sam2ImagePredictorClass(sam2_model)
 
-        device = cfg["device"]
-        predictor.model.to(device)
-        self._predictor = predictor
-    
+        device_name = resolved_configuration["device"]
+        image_predictor.model.to(device_name)
+        self._image_predictor = image_predictor
+
     @torch.inference_mode()
     def oversegment(
         self,
         image_bgr: np.ndarray,
+        *,
         points_per_side: int = 48,
-        pred_iou_thresh: float = 0.75,
-        stability_score_thresh: float = 0.90,
-        box_nms_thresh: float = 0.7,
-        crop_n_layers: int = 1,
+        predicted_intersection_over_union_threshold: float = 0.75,
+        stability_score_threshold: float = 0.90,
+        box_non_maximum_suppression_threshold: float = 0.7,
+        crop_layer_count: int = 1,
         crop_overlap_ratio: float = 0.2,
-        min_mask_region_area: int = 80,
-        multimask_output: bool = True,
+        minimum_mask_region_area: int = 80,
+        multi_mask_output: bool = True,
         points_per_batch: int = 64,
-        progress=None,
-        downscale_long_side: int | None = 1024,
-        max_segments: int = 1500,
+        progress_callback=None,
+        downscale_long_side_pixels: int | None = 1024,
+        maximum_segment_count: int = 1500,
     ) -> np.ndarray:
-        import cv2, numpy as np
+        import cv2
 
-        if self._predictor is None:
+        if self._image_predictor is None:
             self.build()
-        assert self._predictor is not None
 
-        # optional downscale
-        H0, W0 = image_bgr.shape[:2]
-        scale = 1.0
-        work = image_bgr
-        if downscale_long_side and max(H0, W0) > downscale_long_side:
-            scale = downscale_long_side / float(max(H0, W0))
-            work = cv2.resize(
+        original_height, original_width = image_bgr.shape[:2]
+        resize_scale = 1.0
+        working_image_bgr = image_bgr
+        if (
+            downscale_long_side_pixels
+            and max(original_height, original_width) > downscale_long_side_pixels
+        ):
+            resize_scale = downscale_long_side_pixels / float(
+                max(original_height, original_width)
+            )
+            working_image_bgr = cv2.resize(
                 image_bgr,
-                (int(round(W0 * scale)), int(round(H0 * scale))),
+                (int(round(original_width * resize_scale)), int(round(original_height * resize_scale))),
                 interpolation=cv2.INTER_AREA,
             )
-        img_rgb = work[..., ::-1].copy()
+        working_image_rgb = working_image_bgr[..., ::-1].copy()
 
-        AMG = importlib.import_module("sam2.automatic_mask_generator").SAM2AutomaticMaskGenerator
+        AutomaticMaskGeneratorClass = importlib.import_module(
+            "sam2.automatic_mask_generator"
+        ).SAM2AutomaticMaskGenerator
 
-        def run_amg(pp_side, iou_t, stab_t, crops, overlap, min_area, multi):
-            amg = AMG(
-                self._predictor.model,
-                points_per_side=pp_side,
+        def run_automatic_mask_generator(
+            points_per_side_local: int,
+            predicted_iou_threshold_local: float,
+            stability_score_threshold_local: float,
+            crop_layer_count_local: int,
+            crop_overlap_ratio_local: float,
+            minimum_mask_region_area_local: int,
+            multi_mask_output_local: bool,
+        ):
+            automatic_mask_generator = AutomaticMaskGeneratorClass(
+                self._image_predictor.model,
+                points_per_side=points_per_side_local,
                 points_per_batch=points_per_batch,
-                pred_iou_thresh=iou_t,
-                stability_score_thresh=stab_t,
+                pred_iou_thresh=predicted_iou_threshold_local,
+                stability_score_thresh=stability_score_threshold_local,
                 mask_threshold=0.0,
-                box_nms_thresh=box_nms_thresh,
-                crop_n_layers=crops,
-                crop_overlap_ratio=overlap,
-                min_mask_region_area=min_area,
+                box_nms_thresh=box_non_maximum_suppression_threshold,
+                crop_n_layers=crop_layer_count_local,
+                crop_overlap_ratio=crop_overlap_ratio_local,
+                min_mask_region_area=minimum_mask_region_area_local,
                 output_mode="binary_mask",
-                multimask_output=multi,
+                multimask_output=multi_mask_output_local,
             )
-            if progress: progress(0.05, "Generating proposals (AMG)…")
-            return amg.generate(img_rgb)
+            if progress_callback:
+                progress_callback(0.05, "Generating proposals (AMG)…")
+            return automatic_mask_generator.generate(working_image_rgb)
 
-        # pass 1 (default)
-        props = run_amg(points_per_side, pred_iou_thresh, stability_score_thresh,
-                        crop_n_layers, crop_overlap_ratio, min_mask_region_area, multimask_output)
+        proposals = run_automatic_mask_generator(
+            points_per_side,
+            predicted_intersection_over_union_threshold,
+            stability_score_threshold,
+            crop_layer_count,
+            crop_overlap_ratio,
+            minimum_mask_region_area,
+            multi_mask_output,
+        )
 
-        # if too few, relax and densify once
-        if len(props) <= 3:
-            if progress: progress(0.10, "Few masks; retrying with denser/looser settings…")
-            props = run_amg(
-                pp_side=max(64, points_per_side),
-                iou_t=0.70,
-                stab_t=0.88,
-                crops=max(1, crop_n_layers),
-                overlap=max(0.2, crop_overlap_ratio),
-                min_area=max(20, min_mask_region_area // 2),
-                multi=True,
+        if len(proposals) <= 3:
+            if progress_callback:
+                progress_callback(0.10, "Few masks; retrying with denser/looser settings…")
+            proposals = run_automatic_mask_generator(
+                points_per_side_local=max(64, points_per_side),
+                predicted_iou_threshold_local=0.70,
+                stability_score_threshold_local=0.88,
+                crop_layer_count_local=max(1, crop_layer_count),
+                crop_overlap_ratio_local=max(0.2, crop_overlap_ratio),
+                minimum_mask_region_area_local=max(20, minimum_mask_region_area // 2),
+                multi_mask_output_local=True,
             )
 
-        if not props:
-            if progress: progress(1.0, "No segments found.")
-            return np.zeros((H0, W0), dtype=np.int32)
+        if not proposals:
+            if progress_callback:
+                progress_callback(1.0, "No segments found.")
+            return np.zeros((original_height, original_width), dtype=np.int32)
 
-        # sort by area/score and cap
-        props.sort(key=lambda d: (d.get("area", 0), d.get("predicted_iou", 0.0)), reverse=True)
-        if max_segments and len(props) > max_segments:
-            props = props[:max_segments]
+        proposals.sort(
+            key=lambda record: (
+                record.get("area", 0),
+                record.get("predicted_iou", 0.0),
+            ),
+            reverse=True,
+        )
+        if maximum_segment_count and len(proposals) > maximum_segment_count:
+            proposals = proposals[:maximum_segment_count]
 
-        H, W = img_rgb.shape[:2]
-        label_map = np.zeros((H, W), dtype=np.int32)
-        kept = 0
-        for i, d in enumerate(props, 1):
-            m = d["segmentation"]
-            m_bool = (m > 0) if isinstance(m, np.ndarray) else np.array(m, dtype=bool)
-            if m_bool.sum() < min_mask_region_area:
+        working_height, working_width = working_image_rgb.shape[:2]
+        label_map = np.zeros((working_height, working_width), dtype=np.int32)
+
+        kept_count = 0
+        for proposal_index, proposal in enumerate(proposals, 1):
+            mask_array = proposal["segmentation"]
+            mask_boolean = (
+                (mask_array > 0)
+                if isinstance(mask_array, np.ndarray)
+                else np.array(mask_array, dtype=bool)
+            )
+            if mask_boolean.sum() < minimum_mask_region_area:
                 continue
-            kept += 1
-            label_map[m_bool] = kept
-            if progress and (i % 25 == 0):
-                progress(min(0.98, i / max(1, len(props))), f"Painting {i}/{len(props)}")
+            kept_count += 1
+            label_map[mask_boolean] = kept_count
+            if progress_callback and (proposal_index % 25 == 0):
+                progress_callback(
+                    min(0.98, proposal_index / max(1, len(proposals))),
+                    f"Painting {proposal_index}/{len(proposals)}",
+                )
 
-        # upsample back
-        if scale != 1.0:
-            label_map = cv2.resize(label_map, (W0, H0), interpolation=cv2.INTER_NEAREST)
+        if resize_scale != 1.0:
+            label_map = cv2.resize(
+                label_map, (original_width, original_height), interpolation=cv2.INTER_NEAREST
+            )
 
-        if progress: progress(1.0, f"Done (AMG). segments={int(label_map.max())}")
+        if progress_callback:
+            progress_callback(1.0, f"Done (AMG). segments={int(label_map.max())}")
         print(f"[SAM2] AMG segments={int(label_map.max())}", flush=True)
         return label_map
-            
+
     @torch.inference_mode()
     def predict_from_points(
         self,
         image_bgr: np.ndarray,
-        fg_points: List[Tuple[int, int]] | None = None,
-        bg_points: List[Tuple[int, int]] | None = None,
+        foreground_points: List[Tuple[int, int]] | None = None,
+        background_points: List[Tuple[int, int]] | None = None,
     ) -> np.ndarray:
-        """
-        Run point-prompt segmentation. Returns a (H,W) uint8 mask in {0,1}.
-        """
-        if self._predictor is None:
+        if self._image_predictor is None:
             self.build()
 
-        assert self._predictor is not None
-        image_rgb = image_bgr[..., ::-1].copy()  # BGR -> RGB
-        self._predictor.set_image(image_rgb)
+        image_rgb = image_bgr[..., ::-1].copy()
+        self._image_predictor.set_image(image_rgb)
 
-        points, labels = self._pack_points(fg_points, bg_points)
+        point_coordinates, point_labels = self._pack_points(foreground_points, background_points)
 
-        use_autocast = bool(self._cfg.autocast if self._cfg else True)
-        use_cuda = self._predictor.model.device.type == "cuda"
-        ctx = self._autocast_ctx(enabled=(use_autocast and use_cuda))
+        use_autocast_flag = bool(self._configuration.autocast if self._configuration else True)
+        use_cuda_flag = self._image_predictor.model.device.type == "cuda"
+        autocast_context = self._autocast_context(enabled_flag=(use_autocast_flag and use_cuda_flag))
 
-        with ctx:
-            masks, scores, _ = self._predictor.predict(
-                point_coords=points,
-                point_labels=labels,
+        with autocast_context:
+            masks, scores, _ = self._image_predictor.predict(
+                point_coords=point_coordinates,
+                point_labels=point_labels,
                 multimask_output=False,
             )
 
-        mask = masks[0].astype(np.uint8)  # (H, W) {0,1}
-        return mask
+        binary_mask = masks[0].astype(np.uint8)
+        return binary_mask
 
     def _try_import_sam2(self) -> bool:
         try:
             import sam2  # noqa: F401
-
             return True
         except Exception:
             return False
 
     def _get_sam2_constructors(self):
-        if not self._available:
+        if not self._is_available:
             raise Sam2NotAvailable("SAM2 import failed.")
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
-
         return build_sam2, SAM2ImagePredictor
 
-    def _resolve_config(self, cfg: Sam2Config) -> dict:
+    def _resolve_configuration(self, configuration: Sam2Config) -> dict:
         from pathlib import Path
-        import os, torch
+        import os
 
-        repo = Path(cfg.sam2_repo_root or os.getenv("WHEATVISION_SAM2_REPO", "external/sam2_repo")).resolve()
+        repository_path = Path(
+            configuration.sam2_repo_root or os.getenv("WHEATVISION_SAM2_REPO", "external/sam2_repo")
+        ).resolve()
 
-        ckpt_str = cfg.checkpoint_path or os.getenv("WHEATVISION_SAM2_CKPT", "")
-        if not ckpt_str:
+        checkpoint_path_string = configuration.checkpoint_path or os.getenv("WHEATVISION_SAM2_CKPT", "")
+        if not checkpoint_path_string:
             raise FileNotFoundError("WHEATVISION_SAM2_CKPT is empty / missing in .env.")
-        ckpt = Path(ckpt_str)
-        if not ckpt.is_absolute():
-            ckpt = (Path.cwd() / ckpt).resolve()
-        if not ckpt.is_file():
-            alt = (repo / ckpt_str).resolve()
-            if alt.is_file():
-                ckpt = alt
+        checkpoint_path = Path(checkpoint_path_string)
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = (Path.cwd() / checkpoint_path).resolve()
+        if not checkpoint_path.is_file():
+            alternative_checkpoint_path = (repository_path / checkpoint_path_string).resolve()
+            if alternative_checkpoint_path.is_file():
+                checkpoint_path = alternative_checkpoint_path
             else:
                 raise FileNotFoundError(
-                    f"Checkpoint not found at:\n  {ckpt}\n"
-                    f"(also tried repo-relative: {alt})\n"
+                    f"Checkpoint not found at:\n  {checkpoint_path}\n"
+                    f"(also tried repo-relative: {alternative_checkpoint_path})\n"
                     "Fix WHEATVISION_SAM2_CKPT in .env."
                 )
 
-        cfg_str = (cfg.model_cfg_path or os.getenv("WHEATVISION_SAM2_CFG", "")).strip()
-        if not cfg_str:
+        model_config_string = (configuration.model_cfg_path or os.getenv("WHEATVISION_SAM2_CFG", "")).strip()
+        if not model_config_string:
             raise FileNotFoundError("WHEATVISION_SAM2_CFG is empty / missing in .env.")
 
-        cfg_path = Path(cfg_str)
-        if not cfg_path.is_absolute():
-            cfg_path = (Path.cwd() / cfg_path).resolve()
-        if not cfg_path.is_file():
-            alt = (repo / (cfg_str.lstrip("./"))).resolve()
-            if alt.is_file():
-                cfg_path = alt
+        model_config_path = Path(model_config_string)
+        if not model_config_path.is_absolute():
+            model_config_path = (Path.cwd() / model_config_path).resolve()
+        if not model_config_path.is_file():
+            alternative_model_config_path = (repository_path / (model_config_string.lstrip("./"))).resolve()
+            if alternative_model_config_path.is_file():
+                model_config_path = alternative_model_config_path
 
-        if cfg_path.is_file():
- 
+        if model_config_path.is_file():
             try:
-                p = cfg_path.as_posix()
-                needle = "/sam2/configs/"
-                i = p.rfind(needle)
-                if i != -1:
-                    model_cfg_name = "configs/" + p[i + len(needle):]
+                model_config_posix = model_config_path.as_posix()
+                sam2_configs_marker = "/sam2/configs/"
+                marker_index = model_config_posix.rfind(sam2_configs_marker)
+                if marker_index != -1:
+                    model_config_name = "configs/" + model_config_posix[marker_index + len(sam2_configs_marker) :]
                 else:
-                    needle2 = "/configs/"
-                    j = p.rfind(needle2)
-                    if j != -1:
-                        model_cfg_name = "configs/" + p[j + len(needle2):]
+                    generic_configs_marker = "/configs/"
+                    generic_index = model_config_posix.rfind(generic_configs_marker)
+                    if generic_index != -1:
+                        model_config_name = "configs/" + model_config_posix[generic_index + len(generic_configs_marker) :]
                     else:
-                        model_cfg_name = cfg_path.name
+                        model_config_name = model_config_path.name
             except Exception:
-                model_cfg_name = cfg_path.name
+                model_config_name = model_config_path.name
         else:
-            model_cfg_name = cfg_str
+            model_config_name = model_config_string
 
-        device = (
-            cfg.device
+        device_name = (
+            configuration.device
             or os.getenv("WHEATVISION_SAM2_DEVICE")
             or ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
         return {
-            "repo": repo,
-            "checkpoint": ckpt,
-            "model_cfg_name": model_cfg_name,
-            "device": device,
+            "repository_path": repository_path,
+            "checkpoint_path": checkpoint_path,
+            "model_config_name": model_config_name,
+            "device": device_name,
         }
 
     @staticmethod
     def _pack_points(
-        fg_points: List[Tuple[int, int]] | None,
-        bg_points: List[Tuple[int, int]] | None,
+        foreground_points: List[Tuple[int, int]] | None,
+        background_points: List[Tuple[int, int]] | None,
     ):
-        import numpy as np
-
-        fg_points = fg_points or []
-        bg_points = bg_points or []
-        if not fg_points and not bg_points:
+        foreground_points = foreground_points or []
+        background_points = background_points or []
+        if not foreground_points and not background_points:
             return None, None
 
-        pts = np.array(fg_points + bg_points, dtype=np.int32)
-        labels = np.array([1] * len(fg_points) + [0] * len(bg_points), dtype=np.int32)
-        return pts, labels
+        points_array = np.array(foreground_points + background_points, dtype=np.int32)
+        labels_array = np.array(
+            [1] * len(foreground_points) + [0] * len(background_points), dtype=np.int32
+        )
+        return points_array, labels_array
 
     @contextmanager
-    def _autocast_ctx(self, enabled: bool):
-        if enabled:
+    def _autocast_context(self, enabled_flag: bool):
+        if enabled_flag:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 yield
         else:
