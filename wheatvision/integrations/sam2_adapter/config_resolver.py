@@ -5,7 +5,29 @@ import torch
 from wheatvision.core.types import Sam2Config
 
 class Sam2ConfigResolver:
+    """
+    Resolves SAM2 configuration values from a Sam2Config object and environment variables into concrete paths and options.
+    """
     def resolve(self, configuration: Sam2Config) -> dict:
+        """
+        Produces a resolved configuration dictionary containing repository path, checkpoint path, 
+        Hydra model config name, and device.
+
+        Args:
+            configuration (Sam2Config): The user-provided configuration with optional overrides for repo root, 
+            checkpoint, model config path, device, and autocast.
+
+        Returns:
+            dict: A mapping with keys:
+                - "repository_path" (Path): Absolute path to the SAM2 repository.
+                - "checkpoint_path" (Path): Absolute path to the model checkpoint file (.pt).
+                - "model_config_name" (str): Hydra config name (e.g., "configs/sam2.1/sam2.1_hiera_s.yaml").
+                - "device" (str): Target device string ("cuda" or "cpu").
+
+        Raises:
+            FileNotFoundError: If required environment variables are missing or if the checkpoint/config paths cannot be found.
+        """
+                
         repository_path = Path(
             configuration.sam2_repo_root or os.getenv("WHEATVISION_SAM2_REPO", "external/sam2_repo")
         ).resolve()
