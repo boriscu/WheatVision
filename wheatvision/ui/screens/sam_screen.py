@@ -89,35 +89,28 @@ def build_sam_tab():
             height=480,
         )
 
-    def run_overseg(
-        img: np.ndarray, step: int, iou_t: float, multi: bool
-    ) -> Tuple[np.ndarray, np.ndarray, str]:
+    def run_overseg(img, step, iou_t, multi, progress=gr.Progress(track_tqdm=True)):
         if img is None:
             return None, None, "Please upload an image."
-
         try:
-            # Returns a (H,W) integer label map
             label_map = adapter.oversegment(
                 image_bgr=_to_uint8(img),
                 grid_step=int(step),
                 iou_threshold=float(iou_t),
                 multimask=bool(multi),
+                progress=progress,
+                downscale_long_side=1024,
+                max_segments=600,
+                min_area=100,
+                # time_budget_s=90.0,  # enable if you want a hard wall-clock cap
             )
         except Sam2NotAvailable as e:
             return None, None, f"SAM2 not available: {e}"
         except Exception as e:
-            return None, None, f"Segmentation error: {e}"
-
+            return None, None, f"Segmentation error: {type(e).__name__}: {e}"
         vis = _colorize_labels(label_map)
-
-        # Ensure label map is a compact dtype for saving/preview (uint16 to be safe for many segments)
         if label_map.dtype != np.uint16:
-            if label_map.max() < 65535:
-                label_map = label_map.astype(np.uint16)
-            else:
-                # fallback if unexpected huge label count
-                label_map = (label_map % 65535).astype(np.uint16)
-
+            label_map = label_map.astype(np.uint16) if label_map.max() < 65535 else (label_map % 65535).astype(np.uint16)
         return vis, label_map, f"Done. Segments: {int(label_map.max())}"
 
     run_btn.click(

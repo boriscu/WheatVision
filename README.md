@@ -31,9 +31,8 @@ pip install --pre torchvision torchaudio --index-url https://download.pytorch.or
 ### 2) Clone & install SAM2 (editable) next to this repo
 
 ```bash
-mkdir -p external
 git clone https://github.com/facebookresearch/sam2.git external/sam2_repo
-pip install -e external/sam2_rep
+pip install -e external/sam2_repo
 ```
 
 ### 3) Download a checkpoint
@@ -41,7 +40,7 @@ pip install -e external/sam2_rep
 Either use their helper script from the `sam2/checkpoints` folder or download one directly, then place it in a convenient folder, e.g.:
 
 ```bash
-bash external/sam2_repo/checkpoints/download_ckpts.sh
+cd external/sam2_repo/checkpoints && bash download_ckpts.sh
 ```
 
 ### 4) Configuring SAM2
