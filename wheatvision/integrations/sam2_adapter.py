@@ -1,8 +1,7 @@
-import os
 from contextlib import contextmanager
 from dotenv import load_dotenv, find_dotenv
-from pathlib import Path
 from typing import List, Optional, Tuple
+import importlib
 import numpy as np
 import torch
 
@@ -61,119 +60,110 @@ class Sam2Adapter:
         device = cfg["device"]
         predictor.model.to(device)
         self._predictor = predictor
-
+    
     @torch.inference_mode()
     def oversegment(
         self,
         image_bgr: np.ndarray,
-        grid_step: int = 64,
-        iou_threshold: float = 0.8,
-        multimask: bool = True,
-        progress=None,                
-        downscale_long_side: int | None = 1024,  
-        max_segments: int = 600,       
-        min_area: int = 100,           
-        time_budget_s: float | None = None,  
+        points_per_side: int = 48,
+        pred_iou_thresh: float = 0.75,
+        stability_score_thresh: float = 0.90,
+        box_nms_thresh: float = 0.7,
+        crop_n_layers: int = 1,
+        crop_overlap_ratio: float = 0.2,
+        min_mask_region_area: int = 80,
+        multimask_output: bool = True,
+        points_per_batch: int = 64,
+        progress=None,
+        downscale_long_side: int | None = 1024,
+        max_segments: int = 1500,
     ) -> np.ndarray:
-        """Oversegment by probing a uniform grid of positive points. Returns (H,W) label map (int32)."""
-        import time, cv2
+        import cv2, numpy as np
 
         if self._predictor is None:
             self.build()
         assert self._predictor is not None
 
-        t0 = time.perf_counter()
-        orig_h, orig_w = image_bgr.shape[:2]
+        # optional downscale
+        H0, W0 = image_bgr.shape[:2]
         scale = 1.0
         work = image_bgr
-        if downscale_long_side and max(orig_h, orig_w) > downscale_long_side:
-            scale = downscale_long_side / float(max(orig_h, orig_w))
-            new_w = int(round(orig_w * scale))
-            new_h = int(round(orig_h * scale))
-            work = cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        if downscale_long_side and max(H0, W0) > downscale_long_side:
+            scale = downscale_long_side / float(max(H0, W0))
+            work = cv2.resize(
+                image_bgr,
+                (int(round(W0 * scale)), int(round(H0 * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        img_rgb = work[..., ::-1].copy()
 
-        image_rgb = work[..., ::-1].copy()
-        self._predictor.set_image(image_rgb)
+        AMG = importlib.import_module("sam2.automatic_mask_generator").SAM2AutomaticMaskGenerator
 
-        H, W = image_rgb.shape[:2]
-        ys = np.arange(grid_step // 2, H, grid_step)
-        xs = np.arange(grid_step // 2, W, grid_step)
-        total_pts = max(1, len(xs) * len(ys))
+        def run_amg(pp_side, iou_t, stab_t, crops, overlap, min_area, multi):
+            amg = AMG(
+                self._predictor.model,
+                points_per_side=pp_side,
+                points_per_batch=points_per_batch,
+                pred_iou_thresh=iou_t,
+                stability_score_thresh=stab_t,
+                mask_threshold=0.0,
+                box_nms_thresh=box_nms_thresh,
+                crop_n_layers=crops,
+                crop_overlap_ratio=overlap,
+                min_mask_region_area=min_area,
+                output_mode="binary_mask",
+                multimask_output=multi,
+            )
+            if progress: progress(0.05, "Generating proposals (AMG)…")
+            return amg.generate(img_rgb)
 
-        kept_masks: list[np.ndarray] = []
+        # pass 1 (default)
+        props = run_amg(points_per_side, pred_iou_thresh, stability_score_thresh,
+                        crop_n_layers, crop_overlap_ratio, min_mask_region_area, multimask_output)
 
-        def iou_with_existing(mask: np.ndarray) -> float:
-            best = 0.0
-            for m in kept_masks:
-                inter = np.logical_and(mask, m).sum()
-                if inter == 0:
-                    continue
-                union = mask.sum() + m.sum() - inter
-                if union == 0:
-                    continue
-                r = inter / union
-                if r > best:
-                    best = r
-                    if best >= iou_threshold:
-                        break
-            return best
+        # if too few, relax and densify once
+        if len(props) <= 3:
+            if progress: progress(0.10, "Few masks; retrying with denser/looser settings…")
+            props = run_amg(
+                pp_side=max(64, points_per_side),
+                iou_t=0.70,
+                stab_t=0.88,
+                crops=max(1, crop_n_layers),
+                overlap=max(0.2, crop_overlap_ratio),
+                min_area=max(20, min_mask_region_area // 2),
+                multi=True,
+            )
 
-        use_autocast = bool(self._cfg.autocast if self._cfg else True)
-        use_cuda = self._predictor.model.device.type == "cuda"
-        ctx = self._autocast_ctx(enabled=(use_autocast and use_cuda))
+        if not props:
+            if progress: progress(1.0, "No segments found.")
+            return np.zeros((H0, W0), dtype=np.int32)
 
-        print(f"[SAM2] device={self._predictor.model.device} size={W}x{H} step={grid_step} multimask={multimask} pts={total_pts}", flush=True)
+        # sort by area/score and cap
+        props.sort(key=lambda d: (d.get("area", 0), d.get("predicted_iou", 0.0)), reverse=True)
+        if max_segments and len(props) > max_segments:
+            props = props[:max_segments]
 
-        with ctx:
-            idx = 0
-            for y in ys:
-                for x in xs:
-                    idx += 1
-                    if progress:
-                        progress(min(0.99, idx / total_pts), f"Probing point {idx}/{total_pts}, kept={len(kept_masks)}")
-
-                    pts = np.array([[int(x), int(y)]], dtype=np.int32)
-                    labels = np.array([1], dtype=np.int32)
-                    masks, scores, _ = self._predictor.predict(
-                        point_coords=pts,
-                        point_labels=labels,
-                        multimask_output=multimask,
-                    )
-                    if scores is not None:
-                        order = np.argsort(-scores)
-                        masks = masks[order]
-
-                    for m in masks:
-                        m_bool = m.astype(bool)
-                        if min_area and m_bool.sum() < min_area:
-                            continue
-                        if iou_with_existing(m_bool) >= iou_threshold:
-                            continue
-                        kept_masks.append(m_bool)
-                        if len(kept_masks) >= max_segments:
-                            break
-
-                    if len(kept_masks) >= max_segments:
-                        break
-                    if time_budget_s is not None and (time.perf_counter() - t0) > time_budget_s:
-                        print("[SAM2] time budget reached; stopping early", flush=True)
-                        break
-                else:
-                    continue
-                break
-
+        H, W = img_rgb.shape[:2]
         label_map = np.zeros((H, W), dtype=np.int32)
-        for i, m in enumerate(kept_masks, start=1):
-            label_map[m] = i
+        kept = 0
+        for i, d in enumerate(props, 1):
+            m = d["segmentation"]
+            m_bool = (m > 0) if isinstance(m, np.ndarray) else np.array(m, dtype=bool)
+            if m_bool.sum() < min_mask_region_area:
+                continue
+            kept += 1
+            label_map[m_bool] = kept
+            if progress and (i % 25 == 0):
+                progress(min(0.98, i / max(1, len(props))), f"Painting {i}/{len(props)}")
 
+        # upsample back
         if scale != 1.0:
-            label_map = cv2.resize(label_map, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+            label_map = cv2.resize(label_map, (W0, H0), interpolation=cv2.INTER_NEAREST)
 
-        if progress:
-            progress(1.0, f"Done. segments={int(label_map.max())}")
-        print(f"[SAM2] done: segments={int(label_map.max())}", flush=True)
+        if progress: progress(1.0, f"Done (AMG). segments={int(label_map.max())}")
+        print(f"[SAM2] AMG segments={int(label_map.max())}", flush=True)
         return label_map
-        
+            
     @torch.inference_mode()
     def predict_from_points(
         self,
