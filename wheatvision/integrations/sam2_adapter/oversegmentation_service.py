@@ -9,7 +9,7 @@ class Sam2OversegmentationService:
     """
     Provides automatic oversegmentation using SAM2's Automatic Mask Generator and returns a dense integer label map.
     """
-        
+
     @torch.inference_mode()
     def oversegment(
         self,
@@ -22,6 +22,7 @@ class Sam2OversegmentationService:
         crop_layer_count: int = 1,
         crop_overlap_ratio: float = 0.2,
         minimum_mask_region_area: int = 80,
+        maximum_mask_region_area: Optional[int] = None,
         multi_mask_output: bool = True,
         points_per_batch: int = 64,
         progress_callback: Optional[Callable[[float, str], None]] = None,
@@ -41,6 +42,8 @@ class Sam2OversegmentationService:
             crop_layer_count (int): Number of crop layers to refine proposals.
             crop_overlap_ratio (float): Overlap ratio between crops.
             minimum_mask_region_area (int): Minimum area in pixels for accepting a mask.
+            maximum_mask_region_area (Optional[int]): Maximum area in pixels for accepting a mask.
+               If None or <= 0, no upper bound is applied.
             multi_mask_output (bool): Whether to generate multiple candidate masks per point.
             points_per_batch (int): Point prompts processed per batch by the model.
             progress_callback (Optional[Callable[[float, str], None]]): Progress reporter taking (fraction, message).
@@ -104,6 +107,7 @@ class Sam2OversegmentationService:
             proposals=proposals,
             working_shape=working_image_rgb.shape[:2],
             minimum_mask_region_area=minimum_mask_region_area,
+            maximum_mask_region_area=maximum_mask_region_area,
             progress_callback=progress_callback,
         )
 
@@ -138,11 +142,19 @@ class Sam2OversegmentationService:
         original_height, original_width = image_bgr.shape[:2]
         resize_scale = 1.0
         working_image_bgr = image_bgr
-        if downscale_long_side_pixels and max(original_height, original_width) > downscale_long_side_pixels:
-            resize_scale = downscale_long_side_pixels / float(max(original_height, original_width))
+        if (
+            downscale_long_side_pixels
+            and max(original_height, original_width) > downscale_long_side_pixels
+        ):
+            resize_scale = downscale_long_side_pixels / float(
+                max(original_height, original_width)
+            )
             working_image_bgr = cv2.resize(
                 image_bgr,
-                (int(round(original_width * resize_scale)), int(round(original_height * resize_scale))),
+                (
+                    int(round(original_width * resize_scale)),
+                    int(round(original_height * resize_scale)),
+                ),
                 interpolation=cv2.INTER_AREA,
             )
         working_image_rgb = working_image_bgr[..., ::-1].copy()
@@ -155,8 +167,10 @@ class Sam2OversegmentationService:
         Returns:
             Type[Any]: The `SAM2AutomaticMaskGenerator` class.
         """
-                
-        return importlib.import_module("sam2.automatic_mask_generator").SAM2AutomaticMaskGenerator
+
+        return importlib.import_module(
+            "sam2.automatic_mask_generator"
+        ).SAM2AutomaticMaskGenerator
 
     def _run_amg(
         self,
@@ -213,7 +227,7 @@ class Sam2OversegmentationService:
         if progress_callback:
             progress_callback(0.05, "Generating proposals (AMG)…")
         return automatic_mask_generator.generate(working_image_rgb)
-    
+
     def _maybe_relax_and_retry(
         self,
         proposals: List[Dict[str, Any]],
@@ -287,7 +301,10 @@ class Sam2OversegmentationService:
         """
 
         proposals.sort(
-            key=lambda record: (record.get("area", 0), record.get("predicted_iou", 0.0)),
+            key=lambda record: (
+                record.get("area", 0),
+                record.get("predicted_iou", 0.0),
+            ),
             reverse=True,
         )
         if maximum_segment_count and len(proposals) > maximum_segment_count:
@@ -299,6 +316,7 @@ class Sam2OversegmentationService:
         proposals: List[Dict[str, Any]],
         working_shape: Tuple[int, int],
         minimum_mask_region_area: int,
+        maximum_mask_region_area: Optional[int],
         progress_callback: Optional[Callable[[float, str], None]],
     ) -> np.ndarray:
         """
@@ -308,6 +326,7 @@ class Sam2OversegmentationService:
             proposals (List[Dict[str, Any]]): List of proposal dictionaries with a 'segmentation' mask.
             working_shape (Tuple[int, int]): Height and width of the working image.
             minimum_mask_region_area (int): Minimum area in pixels for accepting a mask region.
+            maximum_mask_region_area (Optional[int]): Maximum area threshold for mask acceptance.
             progress_callback (Optional[Callable[[float, str], None]]): Optional progress reporter.
 
         Returns:
@@ -320,11 +339,23 @@ class Sam2OversegmentationService:
         kept_count = 0
         for proposal_index, proposal in enumerate(proposals, 1):
             mask_array = proposal["segmentation"]
-            mask_boolean = (mask_array > 0) if isinstance(mask_array, np.ndarray) else np.array(mask_array, dtype=bool)
-            if mask_boolean.sum() < minimum_mask_region_area:
+            mask_boolean = (
+                (mask_array > 0)
+                if isinstance(mask_array, np.ndarray)
+                else np.array(mask_array, dtype=bool)
+            )
+            mask_area = int(mask_boolean.sum())
+
+            if mask_area < minimum_mask_region_area:
                 continue
+
+            if maximum_mask_region_area is not None and maximum_mask_region_area > 0:
+                if mask_area > maximum_mask_region_area:
+                    continue
+
             kept_count += 1
             label_map[mask_boolean] = kept_count
+
             if progress_callback and (proposal_index % 25 == 0):
                 progress_callback(
                     min(0.98, proposal_index / max(1, len(proposals))),
@@ -351,7 +382,11 @@ class Sam2OversegmentationService:
         Returns:
             np.ndarray: Label map resized to the original image dimensions.
         """
-        
+
         if resize_scale != 1.0:
-            label_map = cv2.resize(label_map, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
+            label_map = cv2.resize(
+                label_map,
+                (original_width, original_height),
+                interpolation=cv2.INTER_NEAREST,
+            )
         return label_map
