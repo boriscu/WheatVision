@@ -10,13 +10,13 @@ import torch
 from wheatvision.integrations.sam2_adapter import Sam2Adapter, Sam2NotAvailable
 
 
-
 def _to_uint8(img: np.ndarray) -> np.ndarray:
     if img is None:
         return img
     if img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
     return img
+
 
 def _colorize_labels(label_map: np.ndarray) -> np.ndarray:
     h, w = label_map.shape
@@ -28,9 +28,11 @@ def _colorize_labels(label_map: np.ndarray) -> np.ndarray:
     colors[0] = np.array([255, 255, 255], dtype=np.uint8)  # background
     return colors[label_map]
 
+
 def _save_uint16_png(path: str, arr: np.ndarray) -> None:
     arr16 = np.ascontiguousarray(arr.astype(np.uint16))
     cv2.imwrite(path, arr16)
+
 
 def _scaled_gray_for_display(label_map: np.ndarray) -> np.ndarray:
     max_id = int(label_map.max())
@@ -40,6 +42,7 @@ def _scaled_gray_for_display(label_map: np.ndarray) -> np.ndarray:
         scale = max(1, 255 // max_id)
         disp = (label_map * scale).clip(0, 255).astype(np.uint8)
     return cv2.cvtColor(disp, cv2.COLOR_GRAY2RGB)
+
 
 def _process_sam_batch(
     files: List[str],
@@ -53,6 +56,7 @@ def _process_sam_batch(
     downscale_long_side: int,
     max_segments: int,
     multimask_output: bool,
+    maximum_mask_region_area: int,
     progress=gr.Progress(track_tqdm=True),
 ) -> Tuple[List[np.ndarray], List[np.ndarray], str]:
     """
@@ -91,21 +95,22 @@ def _process_sam_batch(
                 crop_layer_count=int(crop_n_layers),
                 crop_overlap_ratio=float(crop_overlap_ratio),
                 minimum_mask_region_area=int(min_mask_region_area),
+                maximum_mask_region_area=int(maximum_mask_region_area),
                 multi_mask_output=bool(multimask_output),
                 points_per_batch=64,
-                progress_callback=progress,   # fine-grained progress if service uses it
+                progress_callback=progress,
                 downscale_long_side_pixels=int(downscale_long_side),
                 maximum_segment_count=int(max_segments),
             )
 
-            vis_rgb = _colorize_labels(label_map)            
-            disp_rgb = _scaled_gray_for_display(label_map)   
+            vis_rgb = _colorize_labels(label_map)
+            disp_rgb = _scaled_gray_for_display(label_map)
 
             color_previews.append(vis_rgb)
             gray_previews.append(disp_rgb)
 
             base = os.path.splitext(os.path.basename(path))[0]
-            lbl_name = f"{base}_labels_uint16.png"   
+            lbl_name = f"{base}_labels_uint16.png"
             vis_name = f"{base}_labels_color.png"
 
             lbl_path = os.path.join(tmpdir, lbl_name)
@@ -122,7 +127,6 @@ def _process_sam_batch(
                 torch.cuda.empty_cache()
 
     return color_previews, gray_previews, zip_path
-
 
 
 def build_sam_tab():
@@ -149,40 +153,79 @@ def build_sam_tab():
 
             with gr.Accordion("Mask Generator Parameters", open=False):
                 points_per_side = gr.Slider(
-                    8, 64, step=1, value=32, label="points_per_side (proposal density)",
-                    info="Grid prompt density. ↑ = more proposals, better small-part recall; slower & more VRAM. ↓ = faster; may miss tiny parts."
+                    8,
+                    64,
+                    step=1,
+                    value=32,
+                    label="points_per_side (proposal density)",
+                    info="Grid prompt density. ↑ = more proposals, better small-part recall; slower & more VRAM. ↓ = faster; may miss tiny parts.",
                 )
                 min_area = gr.Slider(
-                    0, 2000, step=50, value=150, label="min_mask_region_area (px)",
-                    info="Post-filter by area (px). ↑ = remove tiny specks/noise; may drop small legit parts. ↓ = keep fine details; noisier."
+                    0,
+                    2000,
+                    step=50,
+                    value=150,
+                    label="min_mask_region_area (px)",
+                    info="Post-filter by area (px). ↑ = remove tiny specks/noise; may drop small legit parts. ↓ = keep fine details; noisier.",
                 )
                 pred_iou = gr.Slider(
-                    0.70, 0.99, step=0.01, value=0.88, label="pred_iou_thresh",
-                    info="Quality gate (predicted IoU). ↑ = higher precision/fewer masks. ↓ = higher recall/more low-quality masks."
+                    0.70,
+                    0.99,
+                    step=0.01,
+                    value=0.88,
+                    label="pred_iou_thresh",
+                    info="Quality gate (predicted IoU). ↑ = higher precision/fewer masks. ↓ = higher recall/more low-quality masks.",
                 )
                 stab = gr.Slider(
-                    0.80, 0.99, step=0.01, value=0.95, label="stability_score_thresh",
-                    info="Robustness gate under threshold perturbations. ↑ = cleaner, fewer artifacts; may drop thin/low-contrast parts."
+                    0.80,
+                    0.99,
+                    step=0.01,
+                    value=0.95,
+                    label="stability_score_thresh",
+                    info="Robustness gate under threshold perturbations. ↑ = cleaner, fewer artifacts; may drop thin/low-contrast parts.",
                 )
                 crop_layers = gr.Dropdown(
-                    choices=[0, 1], value=0, label="crop_n_layers (0 = fastest)",
-                    info="Multi-scale crops. 0 = full-frame only (fast). 1 = add cropped pass (better small-object recall; slower)."
+                    choices=[0, 1],
+                    value=0,
+                    label="crop_n_layers (0 = fastest)",
+                    info="Multi-scale crops. 0 = full-frame only (fast). 1 = add cropped pass (better small-object recall; slower).",
                 )
                 crop_overlap = gr.Slider(
-                    0.0, 0.6, step=0.05, value=0.0, label="crop_overlap_ratio",
-                    info="Overlap between adjacent crops. Use ≈0.2–0.3 with crop_n_layers=1 to reduce seam misses; 0.0 is fastest."
+                    0.0,
+                    0.6,
+                    step=0.05,
+                    value=0.0,
+                    label="crop_overlap_ratio",
+                    info="Overlap between adjacent crops. Use ≈0.2–0.3 with crop_n_layers=1 to reduce seam misses; 0.0 is fastest.",
                 )
                 max_res = gr.Slider(
-                    640, 1536, step=64, value=1024, label="downscale_long_side (working resolution)",
-                    info="Resize long side before proposals. ↑ = more detail; slower/VRAM↑. ↓ = faster; may lose thin structures."
+                    640,
+                    1536,
+                    step=64,
+                    value=1024,
+                    label="downscale_long_side (working resolution)",
+                    info="Resize long side before proposals. ↑ = more detail; slower/VRAM↑. ↓ = faster; may lose thin structures.",
                 )
                 max_segs = gr.Slider(
-                    50, 2000, step=50, value=800, label="max_segments cap",
-                    info="Max masks to keep after filtering/sorting. Tune to scene complexity to avoid truncation or bloat."
+                    50,
+                    2000,
+                    step=50,
+                    value=800,
+                    label="max_segments cap",
+                    info="Max masks to keep after filtering/sorting. Tune to scene complexity to avoid truncation or bloat.",
+                )
+                max_area = gr.Slider(
+                    1000,
+                    500000,
+                    step=5000,
+                    value=150000,
+                    label="max_mask_region_area (px)",
+                    info="Remove overly large segments; helpful to avoid whole-bush masks.",
                 )
                 multimask = gr.Checkbox(
-                    value=False, label="multimask_output (more variants per point)",
-                    info="Keep multiple candidates per point. On = higher recall/diversity, slower & more overlaps; Off = cleaner/faster."
+                    value=False,
+                    label="multimask_output (more variants per point)",
+                    info="Keep multiple candidates per point. On = higher recall/diversity, slower & more overlaps; Off = cleaner/faster.",
                 )
 
             run_btn = gr.Button("Run SAM2 Batch", variant="primary")
@@ -195,7 +238,20 @@ def build_sam_tab():
             gr.Markdown("### Label map (scaled grayscale, preview only)")
             gray_gallery = gr.Gallery(columns=3, height=300, label="Label Previews")
 
-    def _run(files_list, pps, min_px, p_iou, stab_t, crops, overlap, work_res, max_k, multi, progress=gr.Progress(track_tqdm=True)):
+    def _run(
+        files_list,
+        pps,
+        min_px,
+        p_iou,
+        stab_t,
+        crops,
+        overlap,
+        work_res,
+        max_k,
+        max_segments: int,
+        multi,
+        progress=gr.Progress(track_tqdm=True),
+    ):
         if not files_list:
             return [], [], None
         try:
@@ -210,6 +266,7 @@ def build_sam_tab():
                 downscale_long_side=int(work_res),
                 max_segments=int(max_k),
                 multimask_output=bool(multi),
+                maximum_mask_region_area=int(max_segments),
                 progress=progress,
             )
             return color_pre, gray_pre, zip_path
@@ -222,6 +279,18 @@ def build_sam_tab():
 
     run_btn.click(
         _run,
-        inputs=[files, points_per_side, min_area, pred_iou, stab, crop_layers, crop_overlap, max_res, max_segs, multimask],
+        inputs=[
+            files,
+            points_per_side,
+            min_area,
+            pred_iou,
+            stab,
+            crop_layers,
+            crop_overlap,
+            max_res,
+            max_segs,
+            max_area,
+            multimask,
+        ],
         outputs=[color_gallery, gray_gallery, zip_out],
     )
