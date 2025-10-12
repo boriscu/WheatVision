@@ -93,30 +93,12 @@ class Sam2Config:
 
 
 @dataclass
-class ShapeDescriptor:
+class AspectRatioReferenceStats:
     """
-    Represents geometric and invariant features of a single object mask.
-    """
-
-    area: float
-    aspect_ratio: float
-    compactness: float
-    hu_moments: np.ndarray
-
-
-@dataclass
-class CocoReferenceStatistics:
-    """
-    Statistical summary of multiple ShapeDescriptor instances from
-    COCO reference data (e.g., manually segmented wheat ears).
+    Simple reference stats for bounding-box aspect ratio (height / width).
+    ratios: the raw list of ratios from the reference set (optional but handy).
     """
 
-    mean_area: float
-    mean_aspect_ratio: float
-    mean_compactness: float
-    mean_hu_moments: np.ndarray
-    std_area: float
-    std_aspect_ratio: float
-    std_compactness: float
-    std_hu_moments: np.ndarray
-    all_descriptors: List[ShapeDescriptor]
+    mean_ratio: float
+    std_ratio: float
+    ratios: List[float]

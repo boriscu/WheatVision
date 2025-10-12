@@ -8,6 +8,7 @@ import zipfile
 import torch
 
 from wheatvision.integrations.sam2_adapter import Sam2Adapter, Sam2NotAvailable
+
 from wheatvision.integrations.sam2_adapter.filtration.coco_reference_loader import (
     CocoEarReferenceLoader,
 )
@@ -25,13 +26,13 @@ def _to_uint8(img: np.ndarray) -> np.ndarray:
 
 
 def _colorize_labels(label_map: np.ndarray) -> np.ndarray:
-    h, w = label_map.shape
-    vis = np.zeros((h, w, 3), dtype=np.uint8)
+    height, width = label_map.shape
+    vis = np.zeros((height, width, 3), dtype=np.uint8)
     if label_map.max() == 0:
         return vis
     rng = np.random.default_rng(42)
     colors = rng.integers(50, 230, size=(label_map.max() + 1, 3), dtype=np.uint8)
-    colors[0] = np.array([255, 255, 255], dtype=np.uint8)  # background
+    colors[0] = np.array([0, 0, 0], dtype=np.uint8)
     return colors[label_map]
 
 
@@ -204,15 +205,15 @@ def build_sam_tab():
             run_btn = gr.Button("Run SAM2 Batch", variant="primary")
             zip_out = gr.File(label="Download segmentation outputs (zip)")
 
-            with gr.Accordion("Shape Filter Parameters", open=False):
-                size_tol = gr.Slider(
-                    0.1, 1.0, step=0.05, value=0.5, label="size_tolerance (± fraction)"
-                )
-                compact_tol = gr.Slider(
-                    0.05, 0.5, step=0.05, value=0.2, label="compactness_tolerance"
-                )
-                hu_thresh = gr.Slider(
-                    0.1, 2.0, step=0.1, value=0.8, label="hu_distance_threshold"
+            with gr.Accordion(
+                "Shape Filter Parameters (Aspect Ratio Only)", open=False
+            ):
+                ratio_tol = gr.Slider(
+                    minimum=0.05,
+                    maximum=1.00,
+                    step=0.05,
+                    value=0.7,
+                    label="ratio_tolerance (± fraction around reference mean)",
                 )
 
             filter_btn = gr.Button(
@@ -273,19 +274,31 @@ def build_sam_tab():
             return [], [], None
 
     def _filter(
-        _, ref_path, size_t, comp_t, hu_t, progress=gr.Progress(track_tqdm=True)
+        _,
+        ref_path,
+        ratio_tolerance,
+        progress=gr.Progress(track_tqdm=True),
     ):
         if not sam_results["label_maps"]:
             gr.Warning("No SAM2 results available. Run segmentation first.")
             return [], None
 
         try:
-            if ref_path:
-                loader = CocoEarReferenceLoader(ref_path.name)
-                ref_stats = loader.load()
-            else:
-                gr.Warning("No reference provided. Cannot filter.")
+            if not ref_path:
+                gr.Warning("No reference provided. Provide instances_default.json.")
                 return [], None
+
+            # Load reference aspect ratios
+            loader = CocoEarReferenceLoader(ref_path.name)
+            ref_stats = loader.load()
+            print(
+                "[REF RATIO] mean=",
+                ref_stats.mean_ratio,
+                "std=",
+                ref_stats.std_ratio,
+                "N=",
+                len(ref_stats.ratios),
+            )
 
             filter_service = ShapeFilterService()
             tmpdir = tempfile.mkdtemp(prefix="wheatvision_filtered_")
@@ -300,18 +313,16 @@ def build_sam_tab():
                     filtered = filter_service.filter_segments(
                         label_map,
                         reference_statistics=ref_stats,
-                        size_tolerance=float(size_t),
-                        compactness_tolerance=float(comp_t),
-                        hu_distance_threshold=float(hu_t),
+                        ratio_tolerance=float(ratio_tolerance),
                         progress_callback=progress,
                     )
+
                     vis = _colorize_labels(filtered)
                     filtered_previews.append(vis)
 
                     base = f"filtered_{idx:03d}"
                     lbl_path = os.path.join(tmpdir, f"{base}_labels_uint16.png")
                     vis_path = os.path.join(tmpdir, f"{base}_labels_color.png")
-
                     _save_uint16_png(lbl_path, filtered)
                     cv2.imwrite(vis_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
                     zipf.write(lbl_path, os.path.basename(lbl_path))
@@ -343,6 +354,6 @@ def build_sam_tab():
 
     filter_btn.click(
         _filter,
-        inputs=[color_gallery, ref_json, size_tol, compact_tol, hu_thresh],
+        inputs=[color_gallery, ref_json, ratio_tol],
         outputs=[filtered_gallery, zip_filtered],
     )
