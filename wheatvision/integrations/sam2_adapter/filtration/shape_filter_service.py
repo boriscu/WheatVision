@@ -5,6 +5,13 @@ import numpy as np
 from wheatvision.core.types import AspectRatioReferenceStats
 
 
+DEFAULT_ASPECT_RATIO_REF = {
+    "mean_ratio": 4.4358038902282715,
+    "std_ratio": 1.9590742588043213,
+    "count": 354,
+}
+
+
 class ShapeFilterService:
     """
     Filters segments by comparing each segment's bounding-box aspect ratio (height/width)

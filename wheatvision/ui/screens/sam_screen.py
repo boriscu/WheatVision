@@ -7,12 +7,14 @@ import tempfile
 import zipfile
 import torch
 
+from wheatvision.core.types import AspectRatioReferenceStats
 from wheatvision.integrations.sam2_adapter import Sam2Adapter, Sam2NotAvailable
 
 from wheatvision.integrations.sam2_adapter.filtration.coco_reference_loader import (
     CocoEarReferenceLoader,
 )
 from wheatvision.integrations.sam2_adapter.filtration.shape_filter_service import (
+    DEFAULT_ASPECT_RATIO_REF,
     ShapeFilterService,
 )
 
@@ -168,7 +170,9 @@ def build_sam_tab():
             files = gr.Files(
                 label="Batch images (JPG/PNG)", file_types=["image"], type="filepath"
             )
-            ref_json = gr.File(label="Optional COCO Reference (instances_default.json)")
+            ref_json = gr.File(
+                label="Optional COCO Reference (defaults to internal wheat-ear ratio stats if omitted)"
+            )
 
             with gr.Accordion("Mask Generator Parameters", open=False):
                 points_per_side = gr.Slider(
@@ -284,21 +288,27 @@ def build_sam_tab():
             return [], None
 
         try:
-            if not ref_path:
-                gr.Warning("No reference provided. Provide instances_default.json.")
-                return [], None
-
-            # Load reference aspect ratios
-            loader = CocoEarReferenceLoader(ref_path.name)
-            ref_stats = loader.load()
-            print(
-                "[REF RATIO] mean=",
-                ref_stats.mean_ratio,
-                "std=",
-                ref_stats.std_ratio,
-                "N=",
-                len(ref_stats.ratios),
-            )
+            # Use uploaded COCO JSON if provided; otherwise fall back to built-in defaults
+            if ref_path:
+                loader = CocoEarReferenceLoader(ref_path.name)
+                reference_stats = loader.load()
+                print(
+                    "[REF RATIO] mean=",
+                    reference_stats.mean_ratio,
+                    "std=",
+                    reference_stats.std_ratio,
+                    "N=",
+                    len(reference_stats.ratios),
+                    "(from uploaded file)",
+                )
+            else:
+                print("[REF RATIO] Using built-in defaults (no file uploaded).")
+                reference_stats = AspectRatioReferenceStats(
+                    mean_ratio=DEFAULT_ASPECT_RATIO_REF["mean_ratio"],
+                    std_ratio=DEFAULT_ASPECT_RATIO_REF["std_ratio"],
+                    ratios=[DEFAULT_ASPECT_RATIO_REF["mean_ratio"]]
+                    * DEFAULT_ASPECT_RATIO_REF["count"],
+                )
 
             filter_service = ShapeFilterService()
             tmpdir = tempfile.mkdtemp(prefix="wheatvision_filtered_")
@@ -312,7 +322,7 @@ def build_sam_tab():
                     )
                     filtered = filter_service.filter_segments(
                         label_map,
-                        reference_statistics=ref_stats,
+                        reference_statistics=reference_stats,
                         ratio_tolerance=float(ratio_tolerance),
                         progress_callback=progress,
                     )
