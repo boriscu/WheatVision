@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
+from typing import List, Optional
 import numpy as np
 
 
@@ -47,6 +47,7 @@ class SplitSearchConfig:
 @dataclass
 class PreprocessingConfig:
     """Aggregate configuration for preprocessing."""
+
     hsv: HSVThresholds = field(default_factory=HSVThresholds)
     morphology: MorphologyConfig = field(default_factory=MorphologyConfig)
     split: SplitSearchConfig = field(default_factory=SplitSearchConfig)
@@ -89,3 +90,33 @@ class Sam2Config:
     model_cfg_path: Optional[str] = None  # .yaml
     device: Optional[str] = None  # "cuda" | "cpu" | None=auto
     autocast: bool = True  # Use autocast on CUDA if available
+
+
+@dataclass
+class ShapeDescriptor:
+    """
+    Represents geometric and invariant features of a single object mask.
+    """
+
+    area: float
+    aspect_ratio: float
+    compactness: float
+    hu_moments: np.ndarray
+
+
+@dataclass
+class CocoReferenceStatistics:
+    """
+    Statistical summary of multiple ShapeDescriptor instances from
+    COCO reference data (e.g., manually segmented wheat ears).
+    """
+
+    mean_area: float
+    mean_aspect_ratio: float
+    mean_compactness: float
+    mean_hu_moments: np.ndarray
+    std_area: float
+    std_aspect_ratio: float
+    std_compactness: float
+    std_hu_moments: np.ndarray
+    all_descriptors: List[ShapeDescriptor]

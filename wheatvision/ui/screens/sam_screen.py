@@ -8,6 +8,12 @@ import zipfile
 import torch
 
 from wheatvision.integrations.sam2_adapter import Sam2Adapter, Sam2NotAvailable
+from wheatvision.integrations.sam2_adapter.filtration.coco_reference_loader import (
+    CocoEarReferenceLoader,
+)
+from wheatvision.integrations.sam2_adapter.filtration.shape_filter_service import (
+    ShapeFilterService,
+)
 
 
 def _to_uint8(img: np.ndarray) -> np.ndarray:
@@ -44,6 +50,11 @@ def _scaled_gray_for_display(label_map: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(disp, cv2.COLOR_GRAY2RGB)
 
 
+# -------------------------------------------------------------------------
+# SAM2 Processing
+# -------------------------------------------------------------------------
+
+
 def _process_sam_batch(
     files: List[str],
     *,
@@ -58,10 +69,10 @@ def _process_sam_batch(
     multimask_output: bool,
     maximum_mask_region_area: int,
     progress=gr.Progress(track_tqdm=True),
-) -> Tuple[List[np.ndarray], List[np.ndarray], str]:
+) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], str]:
     """
     Run SAM2 oversegmentation over a list of filepaths.
-    Returns (colorized_previews, label_previews_grayRGB, zip_path).
+    Returns (colorized_previews, label_previews_grayRGB, label_maps, zip_path).
     """
 
     adapter = Sam2Adapter()
@@ -73,6 +84,7 @@ def _process_sam_batch(
 
     color_previews: List[np.ndarray] = []
     gray_previews: List[np.ndarray] = []
+    label_maps: List[np.ndarray] = []
 
     tmpdir = tempfile.mkdtemp(prefix="wheatvision_sam2_")
     zip_path = os.path.join(tmpdir, "sam2_overseg_outputs.zip")
@@ -108,6 +120,7 @@ def _process_sam_batch(
 
             color_previews.append(vis_rgb)
             gray_previews.append(disp_rgb)
+            label_maps.append(label_map)
 
             base = os.path.splitext(os.path.basename(path))[0]
             lbl_name = f"{base}_labels_uint16.png"
@@ -122,17 +135,23 @@ def _process_sam_batch(
             zipf.write(lbl_path, lbl_name)
             zipf.write(vis_path, vis_name)
 
-            # Help VRAM on very large batches
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    return color_previews, gray_previews, zip_path
+    return color_previews, gray_previews, label_maps, zip_path
+
+
+# -------------------------------------------------------------------------
+# Gradio UI
+# -------------------------------------------------------------------------
 
 
 def build_sam_tab():
-    """Batch-only SAM2 oversegmentation UI (Automatic Mask Generator)."""
+    """Batch-only SAM2 oversegmentation UI (Automatic Mask Generator + optional shape filtering)."""
 
-    gr.Markdown("#### SAM2 Oversegmentation – Batch (Automatic Mask Generator)")
+    gr.Markdown(
+        "#### SAM2 Oversegmentation – Batch (Automatic Mask Generator + Shape Filtering)"
+    )
 
     adapter = Sam2Adapter()
     if not adapter.is_available():
@@ -146,97 +165,74 @@ def build_sam_tab():
     with gr.Row():
         with gr.Column(scale=1):
             files = gr.Files(
-                label="Batch images (JPG/PNG)",
-                file_types=["image"],
-                type="filepath",
+                label="Batch images (JPG/PNG)", file_types=["image"], type="filepath"
             )
+            ref_json = gr.File(label="Optional COCO Reference (instances_default.json)")
 
             with gr.Accordion("Mask Generator Parameters", open=False):
                 points_per_side = gr.Slider(
-                    8,
-                    64,
-                    step=1,
-                    value=32,
-                    label="points_per_side (proposal density)",
-                    info="Grid prompt density. ↑ = more proposals, better small-part recall; slower & more VRAM. ↓ = faster; may miss tiny parts.",
+                    8, 64, step=1, value=32, label="points_per_side"
                 )
                 min_area = gr.Slider(
-                    0,
-                    2000,
-                    step=50,
-                    value=150,
-                    label="min_mask_region_area (px)",
-                    info="Post-filter by area (px). ↑ = remove tiny specks/noise; may drop small legit parts. ↓ = keep fine details; noisier.",
+                    0, 2000, step=50, value=150, label="min_mask_region_area (px)"
                 )
                 pred_iou = gr.Slider(
-                    0.70,
-                    0.99,
-                    step=0.01,
-                    value=0.88,
-                    label="pred_iou_thresh",
-                    info="Quality gate (predicted IoU). ↑ = higher precision/fewer masks. ↓ = higher recall/more low-quality masks.",
+                    0.70, 0.99, step=0.01, value=0.88, label="pred_iou_thresh"
                 )
                 stab = gr.Slider(
-                    0.80,
-                    0.99,
-                    step=0.01,
-                    value=0.95,
-                    label="stability_score_thresh",
-                    info="Robustness gate under threshold perturbations. ↑ = cleaner, fewer artifacts; may drop thin/low-contrast parts.",
+                    0.80, 0.99, step=0.01, value=0.95, label="stability_score_thresh"
                 )
                 crop_layers = gr.Dropdown(
-                    choices=[0, 1],
-                    value=0,
-                    label="crop_n_layers (0 = fastest)",
-                    info="Multi-scale crops. 0 = full-frame only (fast). 1 = add cropped pass (better small-object recall; slower).",
+                    choices=[0, 1], value=0, label="crop_n_layers"
                 )
                 crop_overlap = gr.Slider(
-                    0.0,
-                    0.6,
-                    step=0.05,
-                    value=0.0,
-                    label="crop_overlap_ratio",
-                    info="Overlap between adjacent crops. Use ≈0.2–0.3 with crop_n_layers=1 to reduce seam misses; 0.0 is fastest.",
+                    0.0, 0.6, step=0.05, value=0.0, label="crop_overlap_ratio"
                 )
                 max_res = gr.Slider(
-                    640,
-                    1536,
-                    step=64,
-                    value=1024,
-                    label="downscale_long_side (working resolution)",
-                    info="Resize long side before proposals. ↑ = more detail; slower/VRAM↑. ↓ = faster; may lose thin structures.",
+                    640, 1536, step=64, value=1024, label="downscale_long_side"
                 )
-                max_segs = gr.Slider(
-                    50,
-                    2000,
-                    step=50,
-                    value=800,
-                    label="max_segments cap",
-                    info="Max masks to keep after filtering/sorting. Tune to scene complexity to avoid truncation or bloat.",
-                )
+                max_segs = gr.Slider(50, 2000, step=50, value=800, label="max_segments")
                 max_area = gr.Slider(
                     1000,
                     500000,
                     step=5000,
                     value=150000,
                     label="max_mask_region_area (px)",
-                    info="Remove overly large segments; helpful to avoid whole-bush masks.",
                 )
-                multimask = gr.Checkbox(
-                    value=False,
-                    label="multimask_output (more variants per point)",
-                    info="Keep multiple candidates per point. On = higher recall/diversity, slower & more overlaps; Off = cleaner/faster.",
-                )
+                multimask = gr.Checkbox(value=False, label="multimask_output")
 
             run_btn = gr.Button("Run SAM2 Batch", variant="primary")
-            zip_out = gr.File(label="Download outputs (zip)")
+            zip_out = gr.File(label="Download segmentation outputs (zip)")
+
+            with gr.Accordion("Shape Filter Parameters", open=False):
+                size_tol = gr.Slider(
+                    0.1, 1.0, step=0.05, value=0.5, label="size_tolerance (± fraction)"
+                )
+                compact_tol = gr.Slider(
+                    0.05, 0.5, step=0.05, value=0.2, label="compactness_tolerance"
+                )
+                hu_thresh = gr.Slider(
+                    0.1, 2.0, step=0.1, value=0.8, label="hu_distance_threshold"
+                )
+
+            filter_btn = gr.Button(
+                "Filter Segments by Shape Reference", variant="secondary"
+            )
+            zip_filtered = gr.File(label="Download filtered outputs (zip)")
 
         with gr.Column(scale=2):
-            gr.Markdown("### Colorized segments (preview)")
-            color_gallery = gr.Gallery(columns=3, height=300, label="Colorized")
+            gr.Markdown("### Colorized Segments (Preview)")
+            color_gallery = gr.Gallery(columns=3, height=300)
+            gr.Markdown("### Label Map (Scaled Grayscale)")
+            gray_gallery = gr.Gallery(columns=3, height=300)
+            gr.Markdown("### Filtered Previews (After Shape Filtering)")
+            filtered_gallery = gr.Gallery(columns=3, height=300)
 
-            gr.Markdown("### Label map (scaled grayscale, preview only)")
-            gray_gallery = gr.Gallery(columns=3, height=300, label="Label Previews")
+    # ---------------------------------------------------------------------
+    # Event handlers
+    # ---------------------------------------------------------------------
+
+    sam_results = {"label_maps": []}
 
     def _run(
         files_list,
@@ -248,14 +244,15 @@ def build_sam_tab():
         overlap,
         work_res,
         max_k,
-        max_segments: int,
+        max_segments,
+        max_area_px,
         multi,
         progress=gr.Progress(track_tqdm=True),
     ):
         if not files_list:
             return [], [], None
         try:
-            color_pre, gray_pre, zip_path = _process_sam_batch(
+            color_pre, gray_pre, label_maps, zip_path = _process_sam_batch(
                 files=files_list,
                 points_per_side=int(pps),
                 min_mask_region_area=int(min_px),
@@ -266,16 +263,65 @@ def build_sam_tab():
                 downscale_long_side=int(work_res),
                 max_segments=int(max_k),
                 multimask_output=bool(multi),
-                maximum_mask_region_area=int(max_segments),
+                maximum_mask_region_area=int(max_area_px),
                 progress=progress,
             )
+            sam_results["label_maps"] = label_maps
             return color_pre, gray_pre, zip_path
-        except Sam2NotAvailable as e:
-            gr.Warning(f"SAM2 not available: {e}")
-            return [], [], None
         except Exception as e:
             gr.Warning(f"Segmentation error: {type(e).__name__}: {e}")
             return [], [], None
+
+    def _filter(
+        _, ref_path, size_t, comp_t, hu_t, progress=gr.Progress(track_tqdm=True)
+    ):
+        if not sam_results["label_maps"]:
+            gr.Warning("No SAM2 results available. Run segmentation first.")
+            return [], None
+
+        try:
+            if ref_path:
+                loader = CocoEarReferenceLoader(ref_path.name)
+                ref_stats = loader.load()
+            else:
+                gr.Warning("No reference provided. Cannot filter.")
+                return [], None
+
+            filter_service = ShapeFilterService()
+            tmpdir = tempfile.mkdtemp(prefix="wheatvision_filtered_")
+            zip_path = os.path.join(tmpdir, "filtered_outputs.zip")
+
+            filtered_previews = []
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for idx, label_map in enumerate(sam_results["label_maps"], start=1):
+                    progress(
+                        (idx, len(sam_results["label_maps"])), desc=f"Filtering {idx}…"
+                    )
+                    filtered = filter_service.filter_segments(
+                        label_map,
+                        reference_statistics=ref_stats,
+                        size_tolerance=float(size_t),
+                        compactness_tolerance=float(comp_t),
+                        hu_distance_threshold=float(hu_t),
+                        progress_callback=progress,
+                    )
+                    vis = _colorize_labels(filtered)
+                    filtered_previews.append(vis)
+
+                    base = f"filtered_{idx:03d}"
+                    lbl_path = os.path.join(tmpdir, f"{base}_labels_uint16.png")
+                    vis_path = os.path.join(tmpdir, f"{base}_labels_color.png")
+
+                    _save_uint16_png(lbl_path, filtered)
+                    cv2.imwrite(vis_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+                    zipf.write(lbl_path, os.path.basename(lbl_path))
+                    zipf.write(vis_path, os.path.basename(vis_path))
+
+            return filtered_previews, zip_path
+
+        except Exception as e:
+            gr.Warning(f"Filtering error: {type(e).__name__}: {e}")
+            return [], None
 
     run_btn.click(
         _run,
@@ -293,4 +339,10 @@ def build_sam_tab():
             multimask,
         ],
         outputs=[color_gallery, gray_gallery, zip_out],
+    )
+
+    filter_btn.click(
+        _filter,
+        inputs=[color_gallery, ref_json, size_tol, compact_tol, hu_thresh],
+        outputs=[filtered_gallery, zip_filtered],
     )
