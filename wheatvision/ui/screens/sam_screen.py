@@ -148,15 +148,42 @@ def build_sam_tab():
             )
 
             with gr.Accordion("Mask Generator Parameters", open=False):
-                points_per_side = gr.Slider(8, 64, step=1, value=32, label="points_per_side (proposal density)")
-                min_area = gr.Slider(0, 2000, step=50, value=150, label="min_mask_region_area (px)")
-                pred_iou = gr.Slider(0.70, 0.99, step=0.01, value=0.88, label="pred_iou_thresh")
-                stab = gr.Slider(0.80, 0.99, step=0.01, value=0.95, label="stability_score_thresh")
-                crop_layers = gr.Dropdown(choices=[0, 1], value=0, label="crop_n_layers (0 = fastest)")
-                crop_overlap = gr.Slider(0.0, 0.6, step=0.05, value=0.0, label="crop_overlap_ratio")
-                max_res = gr.Slider(640, 1536, step=64, value=1024, label="downscale_long_side (working resolution)")
-                max_segs = gr.Slider(50, 2000, step=50, value=800, label="max_segments cap")
-                multimask = gr.Checkbox(value=False, label="multimask_output (more variants per point)")
+                points_per_side = gr.Slider(
+                    8, 64, step=1, value=32, label="points_per_side (proposal density)",
+                    info="Grid prompt density. ↑ = more proposals, better small-part recall; slower & more VRAM. ↓ = faster; may miss tiny parts."
+                )
+                min_area = gr.Slider(
+                    0, 2000, step=50, value=150, label="min_mask_region_area (px)",
+                    info="Post-filter by area (px). ↑ = remove tiny specks/noise; may drop small legit parts. ↓ = keep fine details; noisier."
+                )
+                pred_iou = gr.Slider(
+                    0.70, 0.99, step=0.01, value=0.88, label="pred_iou_thresh",
+                    info="Quality gate (predicted IoU). ↑ = higher precision/fewer masks. ↓ = higher recall/more low-quality masks."
+                )
+                stab = gr.Slider(
+                    0.80, 0.99, step=0.01, value=0.95, label="stability_score_thresh",
+                    info="Robustness gate under threshold perturbations. ↑ = cleaner, fewer artifacts; may drop thin/low-contrast parts."
+                )
+                crop_layers = gr.Dropdown(
+                    choices=[0, 1], value=0, label="crop_n_layers (0 = fastest)",
+                    info="Multi-scale crops. 0 = full-frame only (fast). 1 = add cropped pass (better small-object recall; slower)."
+                )
+                crop_overlap = gr.Slider(
+                    0.0, 0.6, step=0.05, value=0.0, label="crop_overlap_ratio",
+                    info="Overlap between adjacent crops. Use ≈0.2–0.3 with crop_n_layers=1 to reduce seam misses; 0.0 is fastest."
+                )
+                max_res = gr.Slider(
+                    640, 1536, step=64, value=1024, label="downscale_long_side (working resolution)",
+                    info="Resize long side before proposals. ↑ = more detail; slower/VRAM↑. ↓ = faster; may lose thin structures."
+                )
+                max_segs = gr.Slider(
+                    50, 2000, step=50, value=800, label="max_segments cap",
+                    info="Max masks to keep after filtering/sorting. Tune to scene complexity to avoid truncation or bloat."
+                )
+                multimask = gr.Checkbox(
+                    value=False, label="multimask_output (more variants per point)",
+                    info="Keep multiple candidates per point. On = higher recall/diversity, slower & more overlaps; Off = cleaner/faster."
+                )
 
             run_btn = gr.Button("Run SAM2 Batch", variant="primary")
             zip_out = gr.File(label="Download outputs (zip)")
