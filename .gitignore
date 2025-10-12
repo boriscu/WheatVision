@@ -212,5 +212,5 @@ external/sam2_repo/**
 *.pt
 
 # Gradio
-.gradio/
+**/.gradio/
 .pem
