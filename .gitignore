@@ -210,3 +210,7 @@ external/sam2_repo/
 external/sam2_repo/**
 .checkpoints/
 *.pt
+
+# Gradio
+**/.gradio/
+.pem
