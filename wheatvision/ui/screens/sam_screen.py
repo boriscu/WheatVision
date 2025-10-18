@@ -6,6 +6,8 @@ import numpy as np
 import tempfile
 import zipfile
 import torch
+import json
+import csv
 
 from wheatvision.core.types import AspectRatioReferenceStats
 from wheatvision.integrations.sam2_adapter import Sam2Adapter, Sam2NotAvailable
@@ -76,7 +78,27 @@ def _process_sam_batch(
     """
     Run SAM2 oversegmentation over a list of filepaths.
     Returns (colorized_previews, label_previews_grayRGB, label_maps, zip_path).
+
+    NEW:
+      - Writes per-image:
+          *_labels_uint16.png (existing)
+          *_labels_color.png  (existing)
+          *_labels_uint16.npy (raw IDs)
+          *_instances.json    (COCO-like polygons for this image)
+          *_segments.csv      (id, area, bbox)
+      - Writes dataset-level coco_instances.json (aggregated).
     """
+
+    def _contours_from_label(mask_for_id: np.ndarray):
+        m = (mask_for_id > 0).astype("uint8")
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return cnts
+
+    def _poly_from_contour(cnt: np.ndarray) -> List[float]:
+        if cnt is None or len(cnt) < 3:
+            return []
+        pts = cnt.reshape(-1, 2).astype(float)
+        return pts.flatten().tolist()
 
     adapter = Sam2Adapter()
     if not adapter.is_available():
@@ -92,6 +114,12 @@ def _process_sam_batch(
     tmpdir = tempfile.mkdtemp(prefix="wheatvision_sam2_")
     zip_path = os.path.join(tmpdir, "sam2_overseg_outputs.zip")
 
+    coco_images = []
+    coco_annotations = []
+    coco_categories = [{"id": 1, "name": "segment"}]
+    next_image_id = 1
+    next_ann_id = 1
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
         total = len(files or [])
         for idx, path in enumerate(files or []):
@@ -100,6 +128,7 @@ def _process_sam_batch(
             image_bgr = cv2.imread(path, cv2.IMREAD_COLOR)
             if image_bgr is None:
                 continue
+            H, W = image_bgr.shape[:2]
 
             label_map = adapter.oversegment(
                 image_bgr=_to_uint8(image_bgr),
@@ -126,20 +155,140 @@ def _process_sam_batch(
             label_maps.append(label_map)
 
             base = os.path.splitext(os.path.basename(path))[0]
-            lbl_name = f"{base}_labels_uint16.png"
-            vis_name = f"{base}_labels_color.png"
+            lbl_name_png = f"{base}_labels_uint16.png"
+            vis_name_png = f"{base}_labels_color.png"
+            lbl_name_npy = f"{base}_labels_uint16.npy"
+            inst_name_json = f"{base}_instances.json"
+            legend_name_csv = f"{base}_segments.csv"
 
-            lbl_path = os.path.join(tmpdir, lbl_name)
-            vis_path = os.path.join(tmpdir, vis_name)
+            lbl_path_png = os.path.join(tmpdir, lbl_name_png)
+            vis_path_png = os.path.join(tmpdir, vis_name_png)
+            lbl_path_npy = os.path.join(tmpdir, lbl_name_npy)
+            inst_path_json = os.path.join(tmpdir, inst_name_json)
+            legend_path_csv = os.path.join(tmpdir, legend_name_csv)
 
-            _save_uint16_png(lbl_path, label_map)
-            cv2.imwrite(vis_path, cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
+            _save_uint16_png(lbl_path_png, label_map)
+            cv2.imwrite(vis_path_png, cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
+            np.save(lbl_path_npy, label_map)
 
-            zipf.write(lbl_path, lbl_name)
-            zipf.write(vis_path, vis_name)
+            unique_ids = np.unique(label_map)
+            unique_ids = unique_ids[unique_ids != 0]
+
+            image_level_annotations = []
+            with open(legend_path_csv, "w", newline="") as fcsv:
+                writer = csv.writer(fcsv)
+                writer.writerow(
+                    ["segment_id", "area_px", "bbox_x", "bbox_y", "bbox_w", "bbox_h"]
+                )
+
+                for seg_id in unique_ids.tolist():
+                    seg_mask = label_map == seg_id
+                    # area
+                    area = float(int(seg_mask.sum()))
+                    if area <= 0:
+                        continue
+
+                    cnts = _contours_from_label(seg_mask)
+                    polygons = []
+                    bbox = None
+
+                    ys, xs = np.where(seg_mask)
+                    if xs.size > 0:
+                        x_min, x_max = int(xs.min()), int(xs.max())
+                        y_min, y_max = int(ys.min()), int(ys.max())
+                        bbox = [
+                            int(x_min),
+                            int(y_min),
+                            int(x_max - x_min + 1),
+                            int(y_max - y_min + 1),
+                        ]
+                    else:
+                        bbox = [0, 0, 0, 0]
+
+                    for c in cnts:
+                        poly = _poly_from_contour(c)
+                        if len(poly) >= 6:
+                            polygons.append(poly)
+
+                    if not polygons:
+                        continue
+
+                    image_level_annotations.append(
+                        {
+                            "segment_id": int(seg_id),
+                            "area": area,
+                            "bbox": bbox,
+                            "segmentation": polygons,
+                            "category_id": 1,
+                        }
+                    )
+
+                    coco_annotations.append(
+                        {
+                            "id": next_ann_id,
+                            "image_id": next_image_id,
+                            "category_id": 1,
+                            "iscrowd": 0,
+                            "area": area,
+                            "bbox": bbox,
+                            "segmentation": polygons,
+                        }
+                    )
+                    next_ann_id += 1
+
+                    writer.writerow([int(seg_id), int(area), *bbox])
+
+            with open(inst_path_json, "w", encoding="utf-8") as fj:
+                json.dump(
+                    {
+                        "image": {
+                            "file_name": os.path.basename(path),
+                            "width": W,
+                            "height": H,
+                        },
+                        "annotations": image_level_annotations,
+                        "categories": [{"id": 1, "name": "segment"}],
+                    },
+                    fj,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+            coco_images.append(
+                {
+                    "id": next_image_id,
+                    "file_name": os.path.basename(path),
+                    "width": W,
+                    "height": H,
+                }
+            )
+            next_image_id += 1
+
+            for p, n in [
+                (lbl_path_png, lbl_name_png),
+                (vis_path_png, vis_name_png),
+                (lbl_path_npy, lbl_name_npy),
+                (inst_path_json, inst_name_json),
+                (legend_path_csv, legend_name_csv),
+            ]:
+                zipf.write(p, n)
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+        coco_path = os.path.join(tmpdir, "coco_instances.json")
+        with open(coco_path, "w", encoding="utf-8") as fd:
+            json.dump(
+                {
+                    "images": coco_images,
+                    "annotations": coco_annotations,
+                    "categories": coco_categories,
+                },
+                fd,
+                ensure_ascii=False,
+                indent=2,
+            )
+        zipf.write(coco_path, "coco_instances.json")
 
     return color_previews, gray_previews, label_maps, zip_path
 
