@@ -4,6 +4,8 @@ from typing import Any, Optional
 import torch
 
 from wheatvision.core.types import Sam2Config
+# VideoTrackingService import is done lazily inside the method to avoid import issues
+
 
 from wheatvision.integrations.sam2_adapter.exceptions import Sam2NotAvailable
 from wheatvision.integrations.sam2_adapter.availability_checker import Sam2AvailabilityChecker
@@ -90,4 +92,25 @@ class Sam2Adapter:
         if self._image_predictor is None:
             self.build()
         return self._overseg_service.oversegment(*args, image_predictor=self._image_predictor, **kwargs)
+
+    def get_video_tracker(self):
+        """
+        Returns an instance of VideoTrackingService configured with the current adapter's configuration.
+        """
+        if not self._is_available:
+             raise Sam2NotAvailable("SAM2 is not importable.")
+        
+        if self._configuration is None:
+             self._configuration = Sam2Config()
+        
+        resolved = self._config_resolver.resolve(self._configuration)
+        
+        # We need to import here to avoid circular dependencies or early failure if optional
+        from wheatvision.integrations.sam2_adapter.video_tracking_service import VideoTrackingService
+        
+        return VideoTrackingService(
+            model_config_name=resolved["model_config_name"],
+            checkpoint_path=str(resolved["checkpoint_path"]),
+            device=resolved["device"]
+        )
 
