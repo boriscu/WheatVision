@@ -6,7 +6,10 @@ from typing import List, Optional, Dict, Any, Tuple
 from tempfile import TemporaryDirectory
 
 # SAM2 Imports - dependent on the external structure
-from sam2.build_sam2_video_predictor import build_sam2_video_predictor
+try:
+    from external.sam2_repo.sam2.build_sam import build_sam2_video_predictor
+except ImportError:
+    from sam2.build_sam import build_sam2_video_predictor
 
 class VideoTrackingService:
     """

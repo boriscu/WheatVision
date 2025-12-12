@@ -27,6 +27,10 @@ class Sam2ConstructorsLoader:
                 
         if not self._is_available:
             raise Sam2NotAvailable("SAM2 import failed.")
-        from sam2.build_sam import build_sam2
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
+        try:
+            from external.sam2_repo.sam2.build_sam import build_sam2
+            from external.sam2_repo.sam2.sam2_image_predictor import SAM2ImagePredictor
+        except ImportError:
+            from sam2.build_sam import build_sam2
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
         return build_sam2, SAM2ImagePredictor
