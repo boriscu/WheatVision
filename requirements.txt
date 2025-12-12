@@ -4,3 +4,4 @@ scipy
 gradio
 pillow
 python-dotenv
+pycocotools

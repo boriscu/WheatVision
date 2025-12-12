@@ -34,23 +34,40 @@ def _process_batch(
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
         for path in files or []:
             image_bgr = cv2.imread(path, cv2.IMREAD_COLOR)
-
             if image_bgr is None:
                 continue
 
             name = os.path.basename(path)
+            stem = name.rsplit(".", 1)[0]
+
             item = ImageItem(name=name, image_bgr=image_bgr)
             result = pipeline.run_on_item(item)
 
-            # Save ears and stalks
-            ears_name = name.rsplit(".", 1)[0] + "_ears.png"
-            stalks_name = name.rsplit(".", 1)[0] + "_stalks.png"
+            ears_name = f"{stem}_ears.png"
+            stalks_name = f"{stem}_stalks.png"
+            ears_p = os.path.join(tmpdir, ears_name)
+            stalks_p = os.path.join(tmpdir, stalks_name)
+            cv2.imwrite(ears_p, result.ears_bgr)
+            cv2.imwrite(stalks_p, result.stalks_bgr)
+            zipf.write(ears_p, ears_name)
+            zipf.write(stalks_p, stalks_name)
 
-            cv2.imwrite(os.path.join(tmpdir, ears_name), result.ears_bgr)
-            cv2.imwrite(os.path.join(tmpdir, stalks_name), result.stalks_bgr)
+            mask = result.foreground_mask
+            if mask.dtype != "uint8":
+                mask = mask.astype("uint8")
+            if mask.max() <= 1:
+                mask = (mask * 255).astype("uint8")
 
-            zipf.write(os.path.join(tmpdir, ears_name), ears_name)
-            zipf.write(os.path.join(tmpdir, stalks_name), stalks_name)
+            mask_name = f"{stem}_mask.png"
+            mask_p = os.path.join(tmpdir, mask_name)
+            cv2.imwrite(mask_p, mask)
+            zipf.write(mask_p, mask_name)
+
+            masked_full_bgr = cv2.bitwise_and(image_bgr, image_bgr, mask=mask)
+            masked_full_name = f"{stem}_masked.png"
+            masked_full_p = os.path.join(tmpdir, masked_full_name)
+            cv2.imwrite(masked_full_p, masked_full_bgr)
+            zipf.write(masked_full_p, masked_full_name)
 
             overlay = image_bgr.copy()
             cv2.line(
@@ -61,9 +78,9 @@ def _process_batch(
                 2,
             )
 
-            mask_rgb = cv2.cvtColor(result.foreground_mask, cv2.COLOR_GRAY2RGB)
+            mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
 
-            overlay_outputs.append(overlay[:, :, ::-1])  # BGR->RGB for Gradio
+            overlay_outputs.append(overlay[:, :, ::-1])
             ears_outputs.append(result.ears_bgr[:, :, ::-1])
             stalks_outputs.append(result.stalks_bgr[:, :, ::-1])
             masks_outputs.append(mask_rgb)

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
+from typing import List, Optional
 import numpy as np
 
 
@@ -47,6 +47,7 @@ class SplitSearchConfig:
 @dataclass
 class PreprocessingConfig:
     """Aggregate configuration for preprocessing."""
+
     hsv: HSVThresholds = field(default_factory=HSVThresholds)
     morphology: MorphologyConfig = field(default_factory=MorphologyConfig)
     split: SplitSearchConfig = field(default_factory=SplitSearchConfig)
@@ -89,3 +90,15 @@ class Sam2Config:
     model_cfg_path: Optional[str] = None  # .yaml
     device: Optional[str] = None  # "cuda" | "cpu" | None=auto
     autocast: bool = True  # Use autocast on CUDA if available
+
+
+@dataclass
+class AspectRatioReferenceStats:
+    """
+    Simple reference stats for bounding-box aspect ratio (height / width).
+    ratios: the raw list of ratios from the reference set (optional but handy).
+    """
+
+    mean_ratio: float
+    std_ratio: float
+    ratios: List[float]

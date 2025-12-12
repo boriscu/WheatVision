@@ -6,8 +6,19 @@ import numpy as np
 import tempfile
 import zipfile
 import torch
+import json
+import csv
 
+from wheatvision.core.types import AspectRatioReferenceStats
 from wheatvision.integrations.sam2_adapter import Sam2Adapter, Sam2NotAvailable
+
+from wheatvision.integrations.sam2_adapter.filtration.coco_reference_loader import (
+    CocoEarReferenceLoader,
+)
+from wheatvision.integrations.sam2_adapter.filtration.shape_filter_service import (
+    DEFAULT_ASPECT_RATIO_REF,
+    ShapeFilterService,
+)
 
 
 def _to_uint8(img: np.ndarray) -> np.ndarray:
@@ -19,13 +30,13 @@ def _to_uint8(img: np.ndarray) -> np.ndarray:
 
 
 def _colorize_labels(label_map: np.ndarray) -> np.ndarray:
-    h, w = label_map.shape
-    vis = np.zeros((h, w, 3), dtype=np.uint8)
+    height, width = label_map.shape
+    vis = np.zeros((height, width, 3), dtype=np.uint8)
     if label_map.max() == 0:
         return vis
     rng = np.random.default_rng(42)
     colors = rng.integers(50, 230, size=(label_map.max() + 1, 3), dtype=np.uint8)
-    colors[0] = np.array([255, 255, 255], dtype=np.uint8)  # background
+    colors[0] = np.array([0, 0, 0], dtype=np.uint8)
     return colors[label_map]
 
 
@@ -44,6 +55,11 @@ def _scaled_gray_for_display(label_map: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(disp, cv2.COLOR_GRAY2RGB)
 
 
+# -------------------------------------------------------------------------
+# SAM2 Processing
+# -------------------------------------------------------------------------
+
+
 def _process_sam_batch(
     files: List[str],
     *,
@@ -58,11 +74,31 @@ def _process_sam_batch(
     multimask_output: bool,
     maximum_mask_region_area: int,
     progress=gr.Progress(track_tqdm=True),
-) -> Tuple[List[np.ndarray], List[np.ndarray], str]:
+) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], str]:
     """
     Run SAM2 oversegmentation over a list of filepaths.
-    Returns (colorized_previews, label_previews_grayRGB, zip_path).
+    Returns (colorized_previews, label_previews_grayRGB, label_maps, zip_path).
+
+    NEW:
+      - Writes per-image:
+          *_labels_uint16.png (existing)
+          *_labels_color.png  (existing)
+          *_labels_uint16.npy (raw IDs)
+          *_instances.json    (COCO-like polygons for this image)
+          *_segments.csv      (id, area, bbox)
+      - Writes dataset-level coco_instances.json (aggregated).
     """
+
+    def _contours_from_label(mask_for_id: np.ndarray):
+        m = (mask_for_id > 0).astype("uint8")
+        cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return cnts
+
+    def _poly_from_contour(cnt: np.ndarray) -> List[float]:
+        if cnt is None or len(cnt) < 3:
+            return []
+        pts = cnt.reshape(-1, 2).astype(float)
+        return pts.flatten().tolist()
 
     adapter = Sam2Adapter()
     if not adapter.is_available():
@@ -73,9 +109,16 @@ def _process_sam_batch(
 
     color_previews: List[np.ndarray] = []
     gray_previews: List[np.ndarray] = []
+    label_maps: List[np.ndarray] = []
 
     tmpdir = tempfile.mkdtemp(prefix="wheatvision_sam2_")
     zip_path = os.path.join(tmpdir, "sam2_overseg_outputs.zip")
+
+    coco_images = []
+    coco_annotations = []
+    coco_categories = [{"id": 1, "name": "segment"}]
+    next_image_id = 1
+    next_ann_id = 1
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
         total = len(files or [])
@@ -85,6 +128,7 @@ def _process_sam_batch(
             image_bgr = cv2.imread(path, cv2.IMREAD_COLOR)
             if image_bgr is None:
                 continue
+            H, W = image_bgr.shape[:2]
 
             label_map = adapter.oversegment(
                 image_bgr=_to_uint8(image_bgr),
@@ -108,31 +152,158 @@ def _process_sam_batch(
 
             color_previews.append(vis_rgb)
             gray_previews.append(disp_rgb)
+            label_maps.append(label_map)
 
             base = os.path.splitext(os.path.basename(path))[0]
-            lbl_name = f"{base}_labels_uint16.png"
-            vis_name = f"{base}_labels_color.png"
+            lbl_name_png = f"{base}_labels_uint16.png"
+            vis_name_png = f"{base}_labels_color.png"
+            lbl_name_npy = f"{base}_labels_uint16.npy"
+            inst_name_json = f"{base}_instances.json"
+            legend_name_csv = f"{base}_segments.csv"
 
-            lbl_path = os.path.join(tmpdir, lbl_name)
-            vis_path = os.path.join(tmpdir, vis_name)
+            lbl_path_png = os.path.join(tmpdir, lbl_name_png)
+            vis_path_png = os.path.join(tmpdir, vis_name_png)
+            lbl_path_npy = os.path.join(tmpdir, lbl_name_npy)
+            inst_path_json = os.path.join(tmpdir, inst_name_json)
+            legend_path_csv = os.path.join(tmpdir, legend_name_csv)
 
-            _save_uint16_png(lbl_path, label_map)
-            cv2.imwrite(vis_path, cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
+            _save_uint16_png(lbl_path_png, label_map)
+            cv2.imwrite(vis_path_png, cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
+            np.save(lbl_path_npy, label_map)
 
-            zipf.write(lbl_path, lbl_name)
-            zipf.write(vis_path, vis_name)
+            unique_ids = np.unique(label_map)
+            unique_ids = unique_ids[unique_ids != 0]
 
-            # Help VRAM on very large batches
+            image_level_annotations = []
+            with open(legend_path_csv, "w", newline="") as fcsv:
+                writer = csv.writer(fcsv)
+                writer.writerow(
+                    ["segment_id", "area_px", "bbox_x", "bbox_y", "bbox_w", "bbox_h"]
+                )
+
+                for seg_id in unique_ids.tolist():
+                    seg_mask = label_map == seg_id
+                    # area
+                    area = float(int(seg_mask.sum()))
+                    if area <= 0:
+                        continue
+
+                    cnts = _contours_from_label(seg_mask)
+                    polygons = []
+                    bbox = None
+
+                    ys, xs = np.where(seg_mask)
+                    if xs.size > 0:
+                        x_min, x_max = int(xs.min()), int(xs.max())
+                        y_min, y_max = int(ys.min()), int(ys.max())
+                        bbox = [
+                            int(x_min),
+                            int(y_min),
+                            int(x_max - x_min + 1),
+                            int(y_max - y_min + 1),
+                        ]
+                    else:
+                        bbox = [0, 0, 0, 0]
+
+                    for c in cnts:
+                        poly = _poly_from_contour(c)
+                        if len(poly) >= 6:
+                            polygons.append(poly)
+
+                    if not polygons:
+                        continue
+
+                    image_level_annotations.append(
+                        {
+                            "segment_id": int(seg_id),
+                            "area": area,
+                            "bbox": bbox,
+                            "segmentation": polygons,
+                            "category_id": 1,
+                        }
+                    )
+
+                    coco_annotations.append(
+                        {
+                            "id": next_ann_id,
+                            "image_id": next_image_id,
+                            "category_id": 1,
+                            "iscrowd": 0,
+                            "area": area,
+                            "bbox": bbox,
+                            "segmentation": polygons,
+                        }
+                    )
+                    next_ann_id += 1
+
+                    writer.writerow([int(seg_id), int(area), *bbox])
+
+            with open(inst_path_json, "w", encoding="utf-8") as fj:
+                json.dump(
+                    {
+                        "image": {
+                            "file_name": os.path.basename(path),
+                            "width": W,
+                            "height": H,
+                        },
+                        "annotations": image_level_annotations,
+                        "categories": [{"id": 1, "name": "segment"}],
+                    },
+                    fj,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+            coco_images.append(
+                {
+                    "id": next_image_id,
+                    "file_name": os.path.basename(path),
+                    "width": W,
+                    "height": H,
+                }
+            )
+            next_image_id += 1
+
+            for p, n in [
+                (lbl_path_png, lbl_name_png),
+                (vis_path_png, vis_name_png),
+                (lbl_path_npy, lbl_name_npy),
+                (inst_path_json, inst_name_json),
+                (legend_path_csv, legend_name_csv),
+            ]:
+                zipf.write(p, n)
+
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    return color_previews, gray_previews, zip_path
+        coco_path = os.path.join(tmpdir, "coco_instances.json")
+        with open(coco_path, "w", encoding="utf-8") as fd:
+            json.dump(
+                {
+                    "images": coco_images,
+                    "annotations": coco_annotations,
+                    "categories": coco_categories,
+                },
+                fd,
+                ensure_ascii=False,
+                indent=2,
+            )
+        zipf.write(coco_path, "coco_instances.json")
+
+    return color_previews, gray_previews, label_maps, zip_path
+
+
+# -------------------------------------------------------------------------
+# Gradio UI
+# -------------------------------------------------------------------------
 
 
 def build_sam_tab():
-    """Batch-only SAM2 oversegmentation UI (Automatic Mask Generator)."""
+    """Batch-only SAM2 oversegmentation UI (Automatic Mask Generator + optional shape filtering)."""
 
-    gr.Markdown("#### SAM2 Oversegmentation – Batch (Automatic Mask Generator)")
+    gr.Markdown(
+        "#### SAM2 Oversegmentation – Batch (Automatic Mask Generator + Shape Filtering)"
+    )
 
     adapter = Sam2Adapter()
     if not adapter.is_available():
@@ -146,97 +317,76 @@ def build_sam_tab():
     with gr.Row():
         with gr.Column(scale=1):
             files = gr.Files(
-                label="Batch images (JPG/PNG)",
-                file_types=["image"],
-                type="filepath",
+                label="Batch images (JPG/PNG)", file_types=["image"], type="filepath"
+            )
+            ref_json = gr.File(
+                label="Optional COCO Reference (defaults to internal wheat-ear ratio stats if omitted)"
             )
 
             with gr.Accordion("Mask Generator Parameters", open=False):
                 points_per_side = gr.Slider(
-                    8,
-                    64,
-                    step=1,
-                    value=32,
-                    label="points_per_side (proposal density)",
-                    info="Grid prompt density. ↑ = more proposals, better small-part recall; slower & more VRAM. ↓ = faster; may miss tiny parts.",
+                    8, 64, step=1, value=32, label="points_per_side"
                 )
                 min_area = gr.Slider(
-                    0,
-                    2000,
-                    step=50,
-                    value=150,
-                    label="min_mask_region_area (px)",
-                    info="Post-filter by area (px). ↑ = remove tiny specks/noise; may drop small legit parts. ↓ = keep fine details; noisier.",
+                    0, 2000, step=50, value=150, label="min_mask_region_area (px)"
                 )
                 pred_iou = gr.Slider(
-                    0.70,
-                    0.99,
-                    step=0.01,
-                    value=0.88,
-                    label="pred_iou_thresh",
-                    info="Quality gate (predicted IoU). ↑ = higher precision/fewer masks. ↓ = higher recall/more low-quality masks.",
+                    0.70, 0.99, step=0.01, value=0.88, label="pred_iou_thresh"
                 )
                 stab = gr.Slider(
-                    0.80,
-                    0.99,
-                    step=0.01,
-                    value=0.95,
-                    label="stability_score_thresh",
-                    info="Robustness gate under threshold perturbations. ↑ = cleaner, fewer artifacts; may drop thin/low-contrast parts.",
+                    0.80, 0.99, step=0.01, value=0.95, label="stability_score_thresh"
                 )
                 crop_layers = gr.Dropdown(
-                    choices=[0, 1],
-                    value=0,
-                    label="crop_n_layers (0 = fastest)",
-                    info="Multi-scale crops. 0 = full-frame only (fast). 1 = add cropped pass (better small-object recall; slower).",
+                    choices=[0, 1], value=0, label="crop_n_layers"
                 )
                 crop_overlap = gr.Slider(
-                    0.0,
-                    0.6,
-                    step=0.05,
-                    value=0.0,
-                    label="crop_overlap_ratio",
-                    info="Overlap between adjacent crops. Use ≈0.2–0.3 with crop_n_layers=1 to reduce seam misses; 0.0 is fastest.",
+                    0.0, 0.6, step=0.05, value=0.0, label="crop_overlap_ratio"
                 )
                 max_res = gr.Slider(
-                    640,
-                    1536,
-                    step=64,
-                    value=1024,
-                    label="downscale_long_side (working resolution)",
-                    info="Resize long side before proposals. ↑ = more detail; slower/VRAM↑. ↓ = faster; may lose thin structures.",
+                    640, 1536, step=64, value=1024, label="downscale_long_side"
                 )
-                max_segs = gr.Slider(
-                    50,
-                    2000,
-                    step=50,
-                    value=800,
-                    label="max_segments cap",
-                    info="Max masks to keep after filtering/sorting. Tune to scene complexity to avoid truncation or bloat.",
-                )
+                max_segs = gr.Slider(50, 2000, step=50, value=800, label="max_segments")
                 max_area = gr.Slider(
                     1000,
                     500000,
                     step=5000,
                     value=150000,
                     label="max_mask_region_area (px)",
-                    info="Remove overly large segments; helpful to avoid whole-bush masks.",
                 )
-                multimask = gr.Checkbox(
-                    value=False,
-                    label="multimask_output (more variants per point)",
-                    info="Keep multiple candidates per point. On = higher recall/diversity, slower & more overlaps; Off = cleaner/faster.",
-                )
+                multimask = gr.Checkbox(value=False, label="multimask_output")
 
             run_btn = gr.Button("Run SAM2 Batch", variant="primary")
-            zip_out = gr.File(label="Download outputs (zip)")
+            zip_out = gr.File(label="Download segmentation outputs (zip)")
+
+            with gr.Accordion(
+                "Shape Filter Parameters (Aspect Ratio Only)", open=False
+            ):
+                ratio_tol = gr.Slider(
+                    minimum=0.05,
+                    maximum=1.00,
+                    step=0.05,
+                    value=0.7,
+                    label="ratio_tolerance (± fraction around reference mean)",
+                )
+
+            filter_btn = gr.Button(
+                "Filter Segments by Shape Reference", variant="secondary"
+            )
+            zip_filtered = gr.File(label="Download filtered outputs (zip)")
 
         with gr.Column(scale=2):
-            gr.Markdown("### Colorized segments (preview)")
-            color_gallery = gr.Gallery(columns=3, height=300, label="Colorized")
+            gr.Markdown("### Colorized Segments (Preview)")
+            color_gallery = gr.Gallery(columns=3, height=300)
+            gr.Markdown("### Label Map (Scaled Grayscale)")
+            gray_gallery = gr.Gallery(columns=3, height=300)
+            gr.Markdown("### Filtered Previews (After Shape Filtering)")
+            filtered_gallery = gr.Gallery(columns=3, height=300)
 
-            gr.Markdown("### Label map (scaled grayscale, preview only)")
-            gray_gallery = gr.Gallery(columns=3, height=300, label="Label Previews")
+    # ---------------------------------------------------------------------
+    # Event handlers
+    # ---------------------------------------------------------------------
+
+    sam_results = {"label_maps": []}
 
     def _run(
         files_list,
@@ -248,14 +398,15 @@ def build_sam_tab():
         overlap,
         work_res,
         max_k,
-        max_segments: int,
+        max_segments,
+        max_area_px,
         multi,
         progress=gr.Progress(track_tqdm=True),
     ):
         if not files_list:
             return [], [], None
         try:
-            color_pre, gray_pre, zip_path = _process_sam_batch(
+            color_pre, gray_pre, label_maps, zip_path = _process_sam_batch(
                 files=files_list,
                 points_per_side=int(pps),
                 min_mask_region_area=int(min_px),
@@ -266,16 +417,81 @@ def build_sam_tab():
                 downscale_long_side=int(work_res),
                 max_segments=int(max_k),
                 multimask_output=bool(multi),
-                maximum_mask_region_area=int(max_segments),
+                maximum_mask_region_area=int(max_area_px),
                 progress=progress,
             )
+            sam_results["label_maps"] = label_maps
             return color_pre, gray_pre, zip_path
-        except Sam2NotAvailable as e:
-            gr.Warning(f"SAM2 not available: {e}")
-            return [], [], None
         except Exception as e:
             gr.Warning(f"Segmentation error: {type(e).__name__}: {e}")
             return [], [], None
+
+    def _filter(
+        _,
+        ref_path,
+        ratio_tolerance,
+        progress=gr.Progress(track_tqdm=True),
+    ):
+        if not sam_results["label_maps"]:
+            gr.Warning("No SAM2 results available. Run segmentation first.")
+            return [], None
+
+        try:
+            # Use uploaded COCO JSON if provided; otherwise fall back to built-in defaults
+            if ref_path:
+                loader = CocoEarReferenceLoader(ref_path.name)
+                reference_stats = loader.load()
+                print(
+                    "[REF RATIO] mean=",
+                    reference_stats.mean_ratio,
+                    "std=",
+                    reference_stats.std_ratio,
+                    "N=",
+                    len(reference_stats.ratios),
+                    "(from uploaded file)",
+                )
+            else:
+                print("[REF RATIO] Using built-in defaults (no file uploaded).")
+                reference_stats = AspectRatioReferenceStats(
+                    mean_ratio=DEFAULT_ASPECT_RATIO_REF["mean_ratio"],
+                    std_ratio=DEFAULT_ASPECT_RATIO_REF["std_ratio"],
+                    ratios=[DEFAULT_ASPECT_RATIO_REF["mean_ratio"]]
+                    * DEFAULT_ASPECT_RATIO_REF["count"],
+                )
+
+            filter_service = ShapeFilterService()
+            tmpdir = tempfile.mkdtemp(prefix="wheatvision_filtered_")
+            zip_path = os.path.join(tmpdir, "filtered_outputs.zip")
+
+            filtered_previews = []
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for idx, label_map in enumerate(sam_results["label_maps"], start=1):
+                    progress(
+                        (idx, len(sam_results["label_maps"])), desc=f"Filtering {idx}…"
+                    )
+                    filtered = filter_service.filter_segments(
+                        label_map,
+                        reference_statistics=reference_stats,
+                        ratio_tolerance=float(ratio_tolerance),
+                        progress_callback=progress,
+                    )
+
+                    vis = _colorize_labels(filtered)
+                    filtered_previews.append(vis)
+
+                    base = f"filtered_{idx:03d}"
+                    lbl_path = os.path.join(tmpdir, f"{base}_labels_uint16.png")
+                    vis_path = os.path.join(tmpdir, f"{base}_labels_color.png")
+                    _save_uint16_png(lbl_path, filtered)
+                    cv2.imwrite(vis_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+                    zipf.write(lbl_path, os.path.basename(lbl_path))
+                    zipf.write(vis_path, os.path.basename(vis_path))
+
+            return filtered_previews, zip_path
+
+        except Exception as e:
+            gr.Warning(f"Filtering error: {type(e).__name__}: {e}")
+            return [], None
 
     run_btn.click(
         _run,
@@ -293,4 +509,10 @@ def build_sam_tab():
             multimask,
         ],
         outputs=[color_gallery, gray_gallery, zip_out],
+    )
+
+    filter_btn.click(
+        _filter,
+        inputs=[color_gallery, ref_json, ratio_tol],
+        outputs=[filtered_gallery, zip_filtered],
     )
