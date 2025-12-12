@@ -4,6 +4,7 @@ import gradio as gr
 
 from wheatvision.ui.screens.video_tracking_screen import build_video_tracking_tab
 from wheatvision.ui.screens.sam_screen import build_sam_tab
+from wheatvision.ui.screens.preprocessing_screen import build_preprocessing_tab
 
 
 def _data_uri(path: Path) -> str:
